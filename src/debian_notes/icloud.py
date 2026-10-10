@@ -1287,6 +1287,34 @@ class ICloudImporter:
             "deleted": deleted,
         }
 
+    def push_prepare(self):
+        """Step 1 of Push: pull first, then work out what still has to go out (compared with the fresh state).
+        The page shows the list for confirmation and calls push_now with the converted content."""
+        if self.busy:
+            return
+        self.busy = True
+        self._set_sync_state("syncing", progress="")
+
+        def run():
+            try:
+                self._sync()
+                candidates = self._on_main(self.sync_candidates)
+                payload = json.dumps(candidates)
+                GLib.idle_add(lambda: (self.win.eval_js(f"window.N && N.sync && N.sync.onPushReady({payload})"), False)[1])
+            except NotSignedIn:
+                self.client = None
+                self._set_sync_state("signin-needed", message="Sign in to iCloud to keep syncing.")
+            except urllib.error.URLError:
+                self._set_sync_state("offline", message="Can't reach iCloud right now.")
+            except Exception as exc:
+                traceback.print_exc()
+                self._log({"sync_error": repr(exc), "trace": traceback.format_exc()})
+                self._set_sync_state("error", message=_friendly_error(exc))
+            finally:
+                self.busy = False
+
+        threading.Thread(target=run, daemon=True).start()
+
     def push_now(self, outgoing):
         """Push only: send local edits and new notes. Notes changed in iCloud since the last pull are refused."""
         if self.busy:

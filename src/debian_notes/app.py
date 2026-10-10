@@ -315,6 +315,9 @@ class Api:
     def icloudSyncNow(self, outgoing=None):
         self._icloud().sync_now(outgoing=outgoing)
 
+    def icloudPushPrepare(self):
+        self._icloud().push_prepare()
+
     def icloudPushNow(self, outgoing):
         self._icloud().push_now(outgoing)
 

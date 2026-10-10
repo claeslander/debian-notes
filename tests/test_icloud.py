@@ -215,6 +215,9 @@ class FakeCloud:
     def lookup(self, names):
         return [self.records[n] if n in self.records else {"recordName": n, "serverErrorCode": "NOT_FOUND"} for n in names]
 
+    def notes_records(self, on_progress, cancelled, token=None):
+        return list(self.records.values()), "TOKEN-2"
+
     def modify(self, ops):
         for op in ops:
             r = op["record"]
@@ -289,6 +292,24 @@ class PushChangesTest(unittest.TestCase):
         self.assertEqual(stats["deleted"], 1)
         self.assertEqual(self.cloud.records["N1"]["fields"]["Folder"]["value"]["recordName"], "TrashFolder-CloudKit")
         self.assertEqual(self.imp.sync_candidates()["deleted"], [])  # not sent twice
+
+    def test_push_pulls_first_and_skips_notes_changed_on_both_sides(self):
+        self.imp._set_sync_state = lambda *a, **k: None
+        self.imp.sync_config = lambda: {"enabled": True, "keepFolders": True, "folders": None}
+        # Edited here…
+        self.store.db.execute("UPDATE notes SET body = '<h1>Pasta</h1><div>mine</div>', updated_at = updated_at + 100 WHERE id = ?", (self.nid,))
+        self.store.commit()
+        # …and on the iPhone.
+        from debian_notes import applenotes as an
+        blob, _ = an.build_note_store([{"style": 0, "runs": [{"text": "Pasta"}]}, {"style": None, "runs": [{"text": "theirs"}]}],
+                                      b"U" * 16, 1800000000, lambda: b"C" * 16)
+        self.cloud.records["N1"]["fields"]["TextDataEncrypted"] = enc(blob)
+        self.cloud.records["N1"]["fields"]["ModificationDate"] = {"value": 1800000000000, "type": "TIMESTAMP"}
+        self.imp._sync()                      # the internal pull of Push
+        cands = self.imp.sync_candidates()    # compared with the fresh state
+        self.assertEqual(cands["edited"], [])  # not pushed over the iPhone's version
+        bodies = [self.store.note_row(n["id"])["body"] for n in self.store.notes() if not n["deletedAt"]]
+        self.assertTrue(any("mine" in b for b in bodies) and any("theirs" in b for b in bodies))  # both kept
 
     def test_cache_keeps_its_sync_token(self):
         # Regression: loading the cache lazily (e.g. for a push) used to drop the token, forcing a full resync.

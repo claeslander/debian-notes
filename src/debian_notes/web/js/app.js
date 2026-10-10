@@ -91,13 +91,20 @@
   // Pull: download changes from iCloud. Nothing is sent.
   A.pull = function () { N.send('icloudSyncNow'); };
 
-  // Push: send local edits of iCloud notes and new notes in iCloud folders, after confirming what goes out.
+  // Push: pull first (Python), then compare with the fresh state and confirm what goes out.
   A.push = async function () {
     if (!pushEnabled()) return;
     await N.editor.flush();
-    const c = await N.call('icloudSyncCandidates');
-    if (!c.edited.length && !c.new.length && !c.deleted.length) { N.ui.toast('Nothing to push — iCloud is up to date with your changes'); return; }
-    const titles = (list) => list.map((n) => '• ' + ((S.notes.get(n.id) || {}).title || 'New Note')).join('\n');
+    N.send('icloudPushPrepare');
+  };
+
+  N.sync = N.sync || {};
+  N.sync.onPushReady = async function (c) {
+    if (!c.edited.length && !c.new.length && !c.deleted.length) {
+      N.ui.toast('Nothing to push — iCloud already has all your changes');
+      return;
+    }
+    const titles = (list) => list.map((n) => '• ' + ((S.notes.get(n.id) || {}).title || n.title || 'New Note')).join('\n');
     const parts = [];
     if (c.new.length) parts.push(`${c.new.length} new ${c.new.length === 1 ? 'note' : 'notes'}:\n${titles(c.new)}`);
     if (c.edited.length) parts.push(`${c.edited.length} changed ${c.edited.length === 1 ? 'note' : 'notes'}:\n${titles(c.edited)}`);
@@ -105,7 +112,8 @@
       c.deleted.map((d) => '• ' + (d.title || 'Untitled')).join('\n'));
     const r = await N.ui.sheet({
       icon: 'cloudUp', title: 'Push to iCloud?', wide: true,
-      message: parts.join('\n\n') + (c.edited.length ? '\n\nThe current iCloud version of each changed note is saved in Version History first.' : ''),
+      message: 'Your notes are up to date with iCloud. These changes will be sent:\n\n' + parts.join('\n\n') +
+        (c.edited.length ? '\n\nThe current iCloud version of each changed note is saved in Version History first.' : ''),
       buttons: [{ label: 'Cancel', value: null }, { label: 'Push', value: 'ok', primary: true }],
     });
     if (r.button !== 'ok') return;
