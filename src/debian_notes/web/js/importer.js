@@ -149,8 +149,8 @@
 
   function importCount() {
     if (!st.plan) return 0;
-    let n = st.plan.folders.filter((f) => st.selected.has(f.id)).reduce((a, f) => a + f.count, 0);
-    if (st.skipExisting) n = Math.max(0, n - Math.min(st.plan.alreadyImported, n));
+    const key = st.skipExisting ? 'newCount' : 'count';
+    let n = st.plan.folders.filter((f) => st.selected.has(f.id)).reduce((a, f) => a + (f[key] ?? f.count), 0);
     if (st.includeDeleted) n += st.plan.deleted;
     return n;
   }
@@ -242,7 +242,7 @@
         <div class="imp-options">
           <label><input type="checkbox" name="sync"${st.sync ? ' checked' : ''}><span>Keep in sync with iCloud<small>New and changed notes in these folders are downloaded automatically. Nothing is sent to iCloud.</small></span></label>
           <label><input type="checkbox" name="keepFolders"${st.keepFolders ? ' checked' : ''}><span>Keep my iCloud folders<small>Otherwise everything goes into one folder called “iCloud”.</small></span></label>
-          <label><input type="checkbox" name="skipExisting"${st.skipExisting ? ' checked' : ''}><span>Skip notes I've already imported<small>${p.alreadyImported ? `${p.alreadyImported} already imported — changed ones are updated.` : 'Changed notes are updated instead of duplicated.'}</small></span></label>
+          <label><input type="checkbox" name="skipExisting"${st.skipExisting ? ' checked' : ''}><span>Skip notes I've already imported<small>${p.alreadyImported ? `${p.alreadyImported} already here — changed ones are updated. Notes in Recently Deleted are restored.` : 'Changed notes are updated instead of duplicated.'}</small></span></label>
           ${p.deleted ? `<label><input type="checkbox" name="includeDeleted"${st.includeDeleted ? ' checked' : ''}><span>Also import Recently Deleted<small>${p.deleted} ${p.deleted === 1 ? 'note goes' : 'notes go'} to Recently Deleted here too.</small></span></label>` : ''}
         </div>
         ${p.locked ? `<div class="imp-notice">${N.icon('lock')} ${p.locked} locked ${p.locked === 1 ? 'note is' : 'notes are'} skipped. Remove the lock on your iPhone to import ${p.locked === 1 ? 'it' : 'them'}.</div>` : ''}

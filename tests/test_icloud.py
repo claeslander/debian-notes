@@ -118,6 +118,25 @@ class ImporterConversionTest(unittest.TestCase):
         self.assertEqual(self.store.note_meta(nid)["title"], "B")
 
 
+class ReimportTest(ImporterConversionTest):
+    def test_trashed_notes_are_importable_and_restored(self):
+        self.imp.sync_config = lambda: {"enabled": False}
+        stats = {"notes": 0, "updated": 0, "tables": 0, "attachments": 0, "skippedAttachments": 0, "failed": 0, "folders": 0}
+        item = self.imp._convert(self.imp.records["N1"], stats)
+        item.update(folder="F2", keep_folders=True, deleted=False, previous=None, pinned=False)
+        self.imp._write([item], stats)
+        nid = self.store.import_state("icloud")["N1"]["note_id"]
+        self.assertEqual(self.imp._plan()["alreadyImported"], 1)
+        self.store.trash_note(nid)  # the user deletes everything
+        plan = self.imp._plan()
+        self.assertEqual(plan["alreadyImported"], 0)
+        self.assertEqual({f["id"]: f["newCount"] for f in plan["folders"]}["F2"], 1)
+        item["previous"] = nid
+        self.imp._write([item], stats)
+        self.assertIsNone(self.store.note_row(nid)["deleted_at"])
+        self.assertEqual(len([n for n in self.store.notes() if not n["deletedAt"]]), 1)
+
+
 class PullSyncTest(ImporterConversionTest):
     def sync(self, touched=(), removed=(), full=False, force=()):
         return self.imp._apply_changes(set(touched), set(force), set(removed), full)

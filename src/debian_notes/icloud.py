@@ -501,8 +501,9 @@ class ICloudImporter:
 
     def _plan(self):
         folders = self._folders()
-        imported = self._on_main(lambda: self.store.imported(SOURCE))
-        counts, deleted, already = {}, 0, 0
+        state = self._on_main(lambda: self.store.import_state(SOURCE))
+        live = {k for k, v in state.items() if v["present"] and not v["deleted_at"]}
+        counts, new_counts, deleted, already = {}, {}, 0, 0
         locked = sum(1 for r in self.records.values()
                      if r.get("recordType") == "PasswordProtectedNote" and not rec_int(r, "Deleted"))
         for rec in self._notes():
@@ -516,10 +517,13 @@ class ICloudImporter:
             if fid not in folders:
                 folders[fid] = {"id": fid, "name": "Notes", "parentId": None}
             counts[fid] = counts.get(fid, 0) + 1
-            if rec["recordName"] in imported:
+            if rec["recordName"] in live:
                 already += 1
+            else:
+                new_counts[fid] = new_counts.get(fid, 0) + 1
         for f in folders.values():
             f["count"] = counts.get(f["id"], 0)
+            f["newCount"] = new_counts.get(f["id"], 0)
             if f["parentId"] not in folders:
                 f["parentId"] = None
         # Only show folders that hold notes (and their parents); iCloud keeps many system/empty folder records.
@@ -551,7 +555,7 @@ class ICloudImporter:
                        folders=None if not chosen or chosen >= all_folders else sorted(chosen))
             self._on_main(lambda: self.store.set_setting("icloud.sync", cfg))
             GLib.idle_add(self.schedule)
-        imported = self._on_main(lambda: self.store.imported(SOURCE))
+        state = self._on_main(lambda: self.store.import_state(SOURCE))
         folders = self._folders()
         pinned = {rec_ref(r, "Note") for r in self.records.values()
                   if r.get("recordType") == "Note_UserSpecific" and rec_int(r, "IsPinned")}
@@ -564,8 +568,9 @@ class ICloudImporter:
             if not deleted and chosen and self._note_folder(rec) not in chosen:
                 continue
             modified = rec_time(rec, "ModificationDate", "modified")
-            prev = imported.get(rec["recordName"])
-            if prev and skip_existing and prev[1] >= modified - 1:
+            st = state.get(rec["recordName"])
+            live = st and st["present"] and not st["deleted_at"]
+            if live and skip_existing and (st["modified"] or 0) >= modified - 1:
                 continue
             todo.append(rec)
 
@@ -587,7 +592,8 @@ class ICloudImporter:
             item["folder"] = self._note_folder(rec)
             item["keep_folders"] = keep_folders
             item["deleted"] = self._is_deleted(rec)
-            item["previous"] = imported.get(rec["recordName"], (None,))[0]
+            st = state.get(rec["recordName"])
+            item["previous"] = st["note_id"] if st and st["present"] else None
             item["pinned"] = rec["recordName"] in pinned
             batch.append(item)
             if len(batch) >= 10 or i == total - 1:
@@ -638,9 +644,11 @@ class ICloudImporter:
                     SOURCE, item["id"], folder_id, item["data"], item["created"], item["modified"],
                     note_id=item["previous"])
                 if item["deleted"]:
-                    self.store.db.execute("UPDATE notes SET deleted_at = ? WHERE id = ?", (time.time(), note_id))
-                elif item.get("pinned"):
-                    self.store.db.execute("UPDATE notes SET pinned = 1 WHERE id = ?", (note_id,))
+                    self.store.db.execute("UPDATE notes SET deleted_at = ?, folder_id = ? WHERE id = ?",
+                                          (time.time(), folder_id, note_id))
+                else:
+                    self.store.db.execute("UPDATE notes SET deleted_at = NULL, folder_id = ?, pinned = ? WHERE id = ?",
+                                          (folder_id, 1 if item.get("pinned") else 0, note_id))
                 stats["updated" if item["previous"] else "notes"] += 1
             self.store.commit()
 
