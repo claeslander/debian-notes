@@ -278,6 +278,17 @@ class PushChangesTest(unittest.TestCase):
             self.imp._push_changes(self.nid, self.paras("Pasta", "mine"))
         self.assertEqual(self.cloud.ops, [])
 
+    def test_push_sends_local_deletions(self):
+        self.store.trash_note(self.nid)  # "delete is just delete" — no prompt; Push sends it later
+        self.imp.sync_config = lambda: {"keepFolders": True}
+        cands = self.imp.sync_candidates()
+        self.assertEqual([d["id"] for d in cands["deleted"]], [self.nid])
+        stats = {"changed": [], "sent": 0, "created": 0, "skipped": 0}
+        self.imp._push_outgoing({"deleted": [self.nid]}, stats)
+        self.assertEqual(stats["deleted"], 1)
+        self.assertEqual(self.cloud.records["N1"]["fields"]["Folder"]["value"]["recordName"], "TrashFolder-CloudKit")
+        self.assertEqual(self.imp.sync_candidates()["deleted"], [])  # not sent twice
+
     def test_move_to_recently_deleted(self):
         self.store.delete_note(self.nid)  # already gone locally (deleted from Recently Deleted)
         res = self.imp._push_trash([self.nid])

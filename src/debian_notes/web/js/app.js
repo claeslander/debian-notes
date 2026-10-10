@@ -88,16 +88,33 @@
 
   let tracked = new Set();  // local notes that mirror an iCloud note
 
-  // Sync button: always pulls; with test push enabled it also sends local edits and new notes.
-  A.syncNow = async function () {
-    if (!pushEnabled()) { N.send('icloudSyncNow'); return; }
+  // Pull: download changes from iCloud. Nothing is sent.
+  A.pull = function () { N.send('icloudSyncNow'); };
+
+  // Push: send local edits of iCloud notes and new notes in iCloud folders, after confirming what goes out.
+  A.push = async function () {
+    if (!pushEnabled()) return;
     await N.editor.flush();
     const c = await N.call('icloudSyncCandidates');
+    if (!c.edited.length && !c.new.length && !c.deleted.length) { N.ui.toast('Nothing to push — iCloud is up to date with your changes'); return; }
+    const titles = (list) => list.map((n) => '• ' + ((S.notes.get(n.id) || {}).title || 'New Note')).join('\n');
+    const parts = [];
+    if (c.new.length) parts.push(`${c.new.length} new ${c.new.length === 1 ? 'note' : 'notes'}:\n${titles(c.new)}`);
+    if (c.edited.length) parts.push(`${c.edited.length} changed ${c.edited.length === 1 ? 'note' : 'notes'}:\n${titles(c.edited)}`);
+    if (c.deleted.length) parts.push(`${c.deleted.length} deleted ${c.deleted.length === 1 ? 'note' : 'notes'} (to Recently Deleted in iCloud):\n` +
+      c.deleted.map((d) => '• ' + (d.title || 'Untitled')).join('\n'));
+    const r = await N.ui.sheet({
+      icon: 'cloudUp', title: 'Push to iCloud?', wide: true,
+      message: parts.join('\n\n') + (c.edited.length ? '\n\nThe current iCloud version of each changed note is saved in Version History first.' : ''),
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Push', value: 'ok', primary: true }],
+    });
+    if (r.button !== 'ok') return;
     const scratch = document.createElement('div');
     const toParas = (body) => { scratch.innerHTML = body; return N.convert.toAppleParagraphs(scratch); };
-    N.send('icloudSyncNow', {
+    N.send('icloudPushNow', {
       edited: c.edited.map((n) => ({ id: n.id, paragraphs: toParas(n.body) })),
       new: c.new.map((n) => ({ id: n.id, folder: n.folder, paragraphs: toParas(n.body) })),
+      deleted: c.deleted.map((d) => d.id),
     });
   };
 
@@ -125,33 +142,6 @@
     N.ui.toast('Sending changes to iCloud…');
     N.send('icloudPushChanges', id, { paragraphs: N.convert.toAppleParagraphs(root) });
   }
-
-  // Deleting a note that also lives in iCloud: optionally move the iCloud copy to Recently Deleted too.
-  // Returns false when cancelled. `permanent` = deleting from Recently Deleted (asks the usual confirmation too).
-  A.confirmICloudDelete = async function (ids, permanent = false) {
-    ids = Array.isArray(ids) ? ids : [ids];
-    const inCloud = ids.filter((id) => tracked.has(id));
-    if (!pushEnabled() || !inCloud.length) {
-      if (!permanent) return true;
-      return N.ui.confirm(ids.length === 1 ? 'Are you sure you want to delete this note?' : `Delete ${ids.length} notes permanently?`,
-        ids.length === 1 ? "This note will be deleted immediately. You can't undo this action." : "You can't undo this action.", 'Delete', true);
-    }
-    const many = inCloud.length > 1;
-    const r = await N.ui.sheet({
-      icon: 'cloud',
-      title: many ? `Also delete ${inCloud.length} notes in iCloud?` : 'Also delete this note in iCloud?',
-      message: (permanent ? 'It will be deleted from this computer permanently. ' : '') +
-        `In iCloud ${many ? 'they move' : 'it moves'} to Recently Deleted, like deleting on your iPhone, and can be recovered there for 30 days.`,
-      buttons: [{ label: 'Cancel', value: null }, { label: 'Only Here', value: 'local' },
-        { label: 'Here and in iCloud', value: 'both', primary: true, danger: true }],
-    });
-    if (r.button === null) return false;
-    if (r.button === 'both') {
-      N.send('icloudPushTrash', inCloud);
-      inCloud.forEach((id) => tracked.delete(id));
-    }
-    return true;
-  };
 
   // ------------------------------------------------------------ version history
 
@@ -266,7 +256,7 @@
 
   // ------------------------------------------------------------ iCloud sync
 
-  const SYNC_ICON = { idle: 'cloud', syncing: 'sync', 'signin-needed': 'cloudAlert', error: 'cloudAlert', offline: 'cloudAlert' };
+  const SYNC_ICON = { idle: 'cloud', syncing: 'sync', pushing: 'sync', 'signin-needed': 'cloudAlert', error: 'cloudAlert', offline: 'cloudAlert' };
   N.sync = Object.assign(N.sync || {}, {
     state: { state: 'off' },
     onStatus(st) {
@@ -274,7 +264,7 @@
       N.sync.state = st;
       renderSyncStatus();
       const c = st.changes;
-      if (st.state === 'idle' && prev.state === 'syncing' && c && (c.added || c.updated || c.removed || c.moved || c.conflicts || c.sent || c.created || c.skipped || (c.changed || []).length)) {
+      if (st.state === 'idle' && (prev.state === 'syncing' || prev.state === 'pushing') && c && (c.added || c.updated || c.removed || c.moved || c.conflicts || c.sent || c.created || c.deleted || c.skipped || (c.changed || []).length)) {
         A.reloadData({ changed: c.changed || [] });
         A.refreshTracked();
         const parts = [];
@@ -284,6 +274,7 @@
         if (c.conflicts) parts.push(`${c.conflicts} kept as copies`);
         if (c.sent) parts.push(`${c.sent} sent`);
         if (c.created) parts.push(`${c.created} created in iCloud`);
+        if (c.deleted) parts.push(`${c.deleted} deleted in iCloud`);
         if (c.skipped) parts.push(`${c.skipped} couldn't be sent`);
         if (c.created || c.sent) A.refreshTracked();
         if (parts.length) N.ui.toast(`iCloud: ${parts.join(', ')}`);
@@ -301,23 +292,30 @@
   }
 
   function renderSyncStatus() {
+    const bar = document.getElementById('sync-bar');
     const el = document.getElementById('sync-status');
     const st = N.sync.state;
-    if (!st || st.state === 'off' || st.enabled === false) { el.hidden = true; return; }
-    el.hidden = false;
+    if (!st || st.state === 'off' || st.enabled === false) { bar.hidden = true; return; }
+    bar.hidden = false;
     const text = {
-      idle: st.last ? `Synced ${relTime(st.last)}` : 'Sync with iCloud',
-      syncing: 'Syncing with iCloud…',
+      idle: st.last ? `Synced ${relTime(st.last)}` : 'iCloud',
+      syncing: 'Pulling from iCloud…',
+      pushing: 'Pushing to iCloud…',
       'signin-needed': 'Sign in to keep syncing',
-      offline: 'Offline — will retry',
-      error: 'Sync problem — click to retry',
+      offline: 'Offline',
+      error: 'Sync problem',
     }[st.state] || '';
-    el.className = 'sync-status state-' + st.state;
-    el.title = st.message || 'Sync now';
-    const manual = !((S.settings['icloud.sync'] || {}).interval > 0);
-    const icon = st.state === 'idle' && manual ? 'sync' : (SYNC_ICON[st.state] || 'cloud');
-    el.title = st.message || (manual ? 'Click to sync with iCloud' : 'Sync now');
-    el.innerHTML = `<span class="sync-icon">${N.icon(icon)}</span><span>${N.esc(text)}</span>`;
+    bar.className = 'sync-bar state-' + st.state;
+    el.title = st.message || '';
+    el.innerHTML = `<span class="sync-icon">${N.icon(SYNC_ICON[st.state] || 'cloud')}</span><span>${N.esc(text)}</span>`;
+    const pull = bar.querySelector('[data-sync="pull"]');
+    const push = bar.querySelector('[data-sync="push"]');
+    pull.innerHTML = N.icon('cloudDown') + '<span>Pull</span>';
+    push.innerHTML = N.icon('cloudUp') + '<span>Push</span>';
+    push.hidden = !pushEnabled();
+    const busy = st.state === 'syncing' || st.state === 'pushing';
+    pull.disabled = push.disabled = busy || st.state === 'signin-needed';
+    if (st.state === 'signin-needed') el.title = 'Click to sign in again';
   }
   setInterval(renderSyncStatus, 30000);
 
@@ -467,7 +465,11 @@
   A.deleteNote = async function (id = S.currentNoteId) {
     const n = S.notes.get(id);
     if (!n) return;
-    if (!(await A.confirmICloudDelete(id, !!n.deletedAt))) return;
+    if (n.deletedAt) {
+      const ok = await N.ui.confirm('Are you sure you want to delete this note?',
+        "This note will be deleted immediately. You can't undo this action.", 'Delete', true);
+      if (!ok) return;
+    }
     const next = neighbourOf(id);
     if (N.editor.noteId() === id) {
       await N.editor.flush();
@@ -528,10 +530,7 @@
   };
 
   A.emptyTrash = async function () {
-    const trashed = Array.from(S.notes.values()).filter((n) => n.deletedAt).map((n) => n.id);
-    const ok = trashed.some((id) => tracked.has(id)) && pushEnabled()
-      ? await A.confirmICloudDelete(trashed, true)
-      : await N.ui.confirm('Permanently delete all notes in Recently Deleted?', "You can't undo this action.", 'Delete All', true);
+    const ok = await N.ui.confirm('Permanently delete all notes in Recently Deleted?', "You can't undo this action.", 'Delete All', true);
     if (!ok) return;
     if (currentNote() && currentNote().deletedAt) N.editor.unmount();
     await N.call('emptyTrash');
@@ -961,8 +960,9 @@
         </div></div>
         <div class="pref-row pref-top"><span>iCloud:</span><div class="pref-checks">
           ${check('icloudSync', 'Keep notes in sync with iCloud (download only)', !!(S.settings['icloud.sync'] || {}).enabled)}
-          <div class="pref-inline">Sync ${sel('icloudInterval', [[0, 'only when I click Sync'], [5, 'every 5 minutes'], [15, 'every 15 minutes'], [30, 'every 30 minutes'], [60, 'every hour']], (S.settings['icloud.sync'] || {}).interval || 0)}</div>
-          <div class="pref-inline"><button class="push-btn" data-pref="syncNow">Sync Now</button>
+          <div class="pref-inline">Pull ${sel('icloudInterval', [[0, 'only when I click Pull'], [5, 'every 5 minutes'], [15, 'every 15 minutes'], [30, 'every 30 minutes'], [60, 'every hour']], (S.settings['icloud.sync'] || {}).interval || 0)}</div>
+          <div class="pref-inline"><button class="push-btn" data-pref="syncNow">Pull Now</button>
+          ${S.settings.icloudTestPush ? '<button class="push-btn" data-pref="pushNow">Push Now</button>' : ''}
           <span class="pref-muted">${N.sync.state.last ? 'Last synced ' + relTime(N.sync.state.last) : ''}</span></div>
           <span class="pref-muted">Sync only downloads. If a note changes in both places, both versions are kept.</span>
           ${check('icloudTestPush', 'Experimental: send notes to iCloud (test)', !!S.settings.icloudTestPush)}
@@ -1006,7 +1006,8 @@
           if (t.name === 'sidebarGlass') applyLayout();
         });
         sheet.addEventListener('click', (e) => {
-          if (e.target.closest('[data-pref="syncNow"]')) { A.syncNow(); return; }
+          if (e.target.closest('[data-pref="syncNow"]')) { A.pull(); return; }
+          if (e.target.closest('[data-pref="pushNow"]')) { A.push(); return; }
           if (e.target.closest('[data-pref="removePushed"]')) {
             N.ui.confirm('Remove test notes from iCloud?',
               'Every note this app created in iCloud (and the “From Debian” folder) is deleted from iCloud. The copies on this computer stay.',
@@ -1223,9 +1224,13 @@
       e.preventDefault();
     });
     searchInput().addEventListener('input', runSearch);
-    document.getElementById('sync-status').addEventListener('click', () => {
-      if (N.sync.state.state === 'signin-needed') N.importer.open({ reconnect: true });
-      else if (N.sync.state.state !== 'syncing') A.syncNow();
+    document.getElementById('sync-bar').addEventListener('click', (e) => {
+      const st = N.sync.state.state;
+      if (st === 'syncing' || st === 'pushing') return;
+      if (st === 'signin-needed') { N.importer.open({ reconnect: true }); return; }
+      const b = e.target.closest('[data-sync]');
+      if (b && b.dataset.sync === 'pull') A.pull();
+      else if (b && b.dataset.sync === 'push') A.push();
     });
     document.getElementById('unlock-form').addEventListener('submit', async (e) => {
       e.preventDefault();

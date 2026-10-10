@@ -1260,10 +1260,48 @@ class ICloudImporter:
         rows = {r["id"]: r for r in self.store.db.execute(
             "SELECT id, body, locked FROM notes WHERE id IN (%s)" % ",".join("?" * len(edited + [n["id"] for n in new]) or "0"),
             edited + [n["id"] for n in new])}
+        # Notes deleted here (in Recently Deleted or gone) whose iCloud copy is still tracked.
+        titles = {name: (rec_text(rec, "TitleEncrypted") or "") for name, rec in (self.records or {}).items()} \
+            if self.records is not None else {}
+        deleted = []
+        for name, st in state.items():
+            if st["deleted_at"] or not st["present"]:
+                title = self.store.db.execute("SELECT title FROM notes WHERE id = ?", (st["note_id"],)).fetchone()
+                deleted.append({"id": st["note_id"], "title": title["title"] if title else titles.get(name, "")})
         return {
             "edited": [{"id": i, "body": rows[i]["body"]} for i in edited if i in rows and not rows[i]["locked"]],
             "new": [dict(n, body=rows[n["id"]]["body"]) for n in new if n["id"] in rows and rows[n["id"]]["body"].strip()],
+            "deleted": deleted,
         }
+
+    def push_now(self, outgoing):
+        """Push only: send local edits and new notes. Notes changed in iCloud since the last pull are refused."""
+        if self.busy:
+            return
+        self.busy = True
+        self._set_sync_state("pushing")
+
+        def run():
+            try:
+                self._ensure_client()
+                stats = {"changed": [], "sent": 0, "created": 0, "skipped": 0}
+                self._push_outgoing(outgoing or {}, stats)
+                self._save_cache()
+                self._log({"push_now": {k: v for k, v in stats.items() if k != "changed"}})
+                self._set_sync_state("idle", last=time.time(), changes=stats)
+            except NotSignedIn:
+                self.client = None
+                self._set_sync_state("signin-needed", message="Sign in to iCloud to keep syncing.")
+            except urllib.error.URLError:
+                self._set_sync_state("offline", message="Can't reach iCloud right now.")
+            except Exception as exc:
+                traceback.print_exc()
+                self._log({"push_error": repr(exc), "trace": traceback.format_exc()})
+                self._set_sync_state("error", message=_friendly_error(exc))
+            finally:
+                self.busy = False
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _push_outgoing(self, outgoing, stats):
         stats.update(sent=0, created=0, skipped=0, skippedReasons=[])
@@ -1281,6 +1319,14 @@ class ICloudImporter:
                 stats["skipped"] += 1
                 stats["skippedReasons"].append(str(exc)[:120])
                 self._log({"sync_push_skip": item["id"], "error": repr(exc)})
+        deleted = [d["id"] if isinstance(d, dict) else d for d in outgoing.get("deleted") or []]
+        if deleted:
+            try:
+                stats["deleted"] = self._push_trash(deleted).get("trashed", 0)
+            except Exception as exc:
+                stats["skipped"] += len(deleted)
+                stats["skippedReasons"].append(str(exc)[:120])
+                self._log({"sync_push_skip": "deleted", "error": repr(exc)})
         for item in outgoing.get("new") or []:
             try:
                 res = self._push(item["id"], item, folder=item.get("folder"))

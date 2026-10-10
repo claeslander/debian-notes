@@ -15,7 +15,11 @@
     </div>
     <div id="sidebar-scroll" class="sidebar-scroll"></div>
     <div class="sidebar-footer">
-      <button id="sync-status" class="sync-status" hidden></button>
+      <div id="sync-bar" class="sync-bar" hidden>
+        <span id="sync-status" class="sync-status"></span>
+        <button class="sync-btn" data-sync="pull" title="Pull: download changes from iCloud"></button>
+        <button class="sync-btn" data-sync="push" title="Push: send your changes to iCloud" hidden></button>
+      </div>
       <button class="sb-new-folder" data-action="newFolder"><span data-icon="plusCircle"></span>New Folder</button>
     </div>
   </aside>
