@@ -31,7 +31,9 @@ GTK_CSS = b"""
 window.notes-window { background: transparent; }
 window.notes-window decoration { border-radius: 10px; border: none;
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.30), 0 0 0 1px rgba(0, 0, 0, 0.10); }
-window.notes-window decoration:backdrop { box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.08); }
+/* Same shadow geometry when unfocused: GTK sizes the window's shadow margin from it, so a different
+   blur/offset would resize and shift the window on every focus change. Only the strength changes. */
+window.notes-window decoration:backdrop { box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.08); }
 window.notes-window.maximized decoration { border-radius: 0; }
 """
 
