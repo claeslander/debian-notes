@@ -307,7 +307,7 @@
     }[st.state] || '';
     bar.className = 'sync-bar state-' + st.state;
     el.title = st.message || '';
-    el.innerHTML = `<span class="sync-icon">${N.icon(SYNC_ICON[st.state] || 'cloud')}</span><span>${N.esc(text)}</span>`;
+    el.textContent = text;
     const pull = bar.querySelector('[data-sync="pull"]');
     const push = bar.querySelector('[data-sync="push"]');
     pull.innerHTML = N.icon('cloudDown') + '<span>Pull</span>';
