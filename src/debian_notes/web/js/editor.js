@@ -285,6 +285,8 @@
     }
   };
 
+  E.isDirty = () => dirty;
+
   E.isEmpty = function () {
     if (!root) return true;
     return !root.innerText.trim() && !root.querySelector('img, table, .nt-file');

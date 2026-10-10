@@ -48,6 +48,9 @@ Tests: `python3 -m unittest discover -s tests`
 - Export to PDF (print), HTML, Markdown and plain text; import `.txt`, `.md` and `.html`
 - **Import from iCloud**: sign in on Apple's own page inside the app and bring over all notes, folders,
   checklists, tables and attachments (⋯ → Import from iCloud…). Locked notes are skipped.
+- **iCloud pull sync** (optional): keeps imported folders up to date every few minutes. Download only;
+  if a note changes both here and in iCloud, both versions are kept. Only Apple's session token is stored,
+  never your password (in `~/.local/share/debian-notes/icloud-web/`, private to your user).
 - Light and dark appearance following the system, adjustable text size, keyboard shortcuts for everything
 
 Data lives in `~/.local/share/debian-notes/` (`notes.db` plus an `attachments/` folder).

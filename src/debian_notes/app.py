@@ -37,6 +37,7 @@ window.notes-window.maximized decoration { border-radius: 0; }
 def data_dir():
     path = os.environ.get("NOTES_DATA_DIR") or os.path.join(GLib.get_user_data_dir(), "debian-notes")
     os.makedirs(path, exist_ok=True)
+    os.chmod(path, 0o700)  # notes, locked-note keys and the iCloud session live here
     return path
 
 
@@ -295,6 +296,25 @@ class Api:
 
     def icloudSignOut(self):
         self._icloud().sign_out()
+
+    def icloudSyncNow(self):
+        self._icloud().sync_now()
+
+    def icloudSetSync(self, changes):
+        return self._icloud().set_sync_config(changes)
+
+    def icloudSyncState(self):
+        if self._icloud_importer is None and not (self.store.get_setting("icloud.sync") or {}).get("enabled"):
+            return {"state": "off"}
+        imp = self._icloud()
+        return dict(imp.sync_state, enabled=imp.sync_config()["enabled"])
+
+    def start_sync_if_enabled(self):
+        if (self.store.get_setting("icloud.sync") or {}).get("enabled"):
+            imp = self._icloud()
+            imp.schedule()
+            GLib.timeout_add_seconds(5, lambda: (imp.sync_now(quiet=True), False)[1])
+        return False
 
     # --------------------------------------------------------------- window
 
@@ -565,6 +585,8 @@ class NotesWindow(Gtk.ApplicationWindow):
     def _on_load_changed(self, _view, event):
         if event != WebKit2.LoadEvent.FINISHED:
             return
+        if not os.environ.get("NOTES_SNAPSHOT"):
+            GLib.idle_add(self.api.start_sync_if_enabled)
         snapshot = os.environ.get("NOTES_SNAPSHOT")
         if snapshot:
             script = os.environ.get("NOTES_EVAL")

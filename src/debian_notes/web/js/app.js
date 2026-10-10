@@ -59,13 +59,67 @@
   // ------------------------------------------------------------ rendering
 
   // Re-read folders and notes from disk (after an import).
-  A.reloadData = async function () {
+  A.reloadData = async function (opts = {}) {
     const data = await N.call('bootstrap');
     S.folders = data.folders;
     S.notes = new Map(data.notes.map((n) => [n.id, n]));
     A.refresh();
-    if (S.currentNoteId != null && !S.notes.has(S.currentNoteId)) await A.selectNote(N.notelist.order[0] ?? null, { force: true });
+    N.notelist.updateSelection();
+    if (S.currentNoteId != null && !S.notes.has(S.currentNoteId)) {
+      await A.selectNote(N.notelist.order[0] ?? null, { force: true });
+    } else if (opts.changed && opts.changed.includes(S.currentNoteId) && !N.editor.isDirty()) {
+      await openNote(S.currentNoteId);  // updated from iCloud while open and not being edited
+    }
   };
+
+  // ------------------------------------------------------------ iCloud sync
+
+  const SYNC_ICON = { idle: 'cloud', syncing: 'sync', 'signin-needed': 'cloudAlert', error: 'cloudAlert', offline: 'cloudAlert' };
+  N.sync = {
+    state: { state: 'off' },
+    onStatus(st) {
+      const prev = N.sync.state;
+      N.sync.state = st;
+      renderSyncStatus();
+      const c = st.changes;
+      if (st.state === 'idle' && prev.state === 'syncing' && c && (c.added || c.updated || c.removed || c.moved || c.conflicts || (c.changed || []).length)) {
+        A.reloadData({ changed: c.changed || [] });
+        const parts = [];
+        if (c.added) parts.push(`${c.added} new`);
+        if (c.updated) parts.push(`${c.updated} updated`);
+        if (c.removed) parts.push(`${c.removed} removed`);
+        if (c.conflicts) parts.push(`${c.conflicts} kept as copies`);
+        if (parts.length) N.ui.toast(`iCloud: ${parts.join(', ')}`);
+      }
+    },
+  };
+
+  function relTime(ts) {
+    if (!ts) return '';
+    const s = Date.now() / 1000 - ts;
+    if (s < 60) return 'just now';
+    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+    return N.date.list(ts);
+  }
+
+  function renderSyncStatus() {
+    const el = document.getElementById('sync-status');
+    const st = N.sync.state;
+    if (!st || st.state === 'off' || st.enabled === false) { el.hidden = true; return; }
+    el.hidden = false;
+    const text = {
+      idle: st.last ? `Synced ${relTime(st.last)}` : 'iCloud sync on',
+      syncing: 'Syncing with iCloud…',
+      'signin-needed': 'Sign in to keep syncing',
+      offline: 'Offline — will retry',
+      error: 'Sync problem — click to retry',
+    }[st.state] || '';
+    el.className = 'sync-status state-' + st.state;
+    el.title = st.message || 'Sync now';
+    el.innerHTML = `<span class="sync-icon">${N.icon(SYNC_ICON[st.state] || 'cloud')}</span><span>${N.esc(text)}</span>`;
+  }
+  setInterval(renderSyncStatus, 30000);
 
   A.refresh = function () {
     N.sidebar.render();
@@ -703,6 +757,12 @@
           ${check('showCounts', 'Show note counts', S.settings.showCounts !== false)}
           ${check('slashCommands', 'Slash commands — type / to format a line', !!S.settings.slashCommands)}
         </div></div>
+        <div class="pref-row"><span>iCloud:</span><div class="pref-checks">
+          ${check('icloudSync', 'Keep notes in sync with iCloud (download only)', !!(S.settings['icloud.sync'] || {}).enabled)}
+          <div class="pref-inline">Check every ${sel('icloudInterval', [[5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, 'hour']], (S.settings['icloud.sync'] || {}).interval || 15)}
+          <button class="push-btn" data-pref="syncNow">Sync Now</button></div>
+          <span class="pref-muted">Changes made here are never sent to iCloud. If a note changes in both places, both versions are kept.</span>
+        </div></div>
         <div class="pref-row"><span>Locked notes:</span><div>
           ${S.lock.configured ? '<button class="push-btn" data-pref="changePassword">Change Password…</button>' : '<span class="pref-muted">No password set yet</span>'}
         </div></div>
@@ -713,6 +773,14 @@
       onOpen(sheet) {
         sheet.addEventListener('change', (e) => {
           const t = e.target;
+          if (t.name === 'icloudSync' || t.name === 'icloudInterval') {
+            const changes = t.name === 'icloudSync' ? { enabled: t.checked } : { interval: +t.value };
+            N.call('icloudSetSync', changes).then((cfg) => {
+              S.settings['icloud.sync'] = cfg;
+              N.sync.onStatus(Object.assign({}, N.sync.state, { enabled: cfg.enabled, state: cfg.enabled ? N.sync.state.state === 'off' ? 'idle' : N.sync.state.state : 'off' }));
+            });
+            return;
+          }
           const v = t.type === 'checkbox' ? t.checked : t.name === 'textSize' ? +t.value : t.value;
           A.setSetting(t.name, v);
           if (t.name === 'appearance') applyTheme();
@@ -721,6 +789,7 @@
           if (t.name === 'showCounts') N.sidebar.render();
         });
         sheet.addEventListener('click', (e) => {
+          if (e.target.closest('[data-pref="syncNow"]')) { N.send('icloudSyncNow'); return; }
           if (e.target.closest('[data-pref="changePassword"]')) {
             sheet.closest('.sheet-backdrop').remove();
             changePassword();
@@ -931,6 +1000,10 @@
       e.preventDefault();
     });
     searchInput().addEventListener('input', runSearch);
+    document.getElementById('sync-status').addEventListener('click', () => {
+      if (N.sync.state.state === 'signin-needed') N.importer.open();
+      else if (N.sync.state.state !== 'syncing') N.send('icloudSyncNow');
+    });
     document.getElementById('unlock-form').addEventListener('submit', async (e) => {
       e.preventDefault();
       const input = document.getElementById('unlock-input');
@@ -992,6 +1065,7 @@
     await A.selectNote(start, { force: true });
     document.getElementById('note-list').focus({ preventScroll: true });
     body.classList.add('ready');
+    N.call('icloudSyncState').then((st) => N.sync.onStatus(st)).catch(() => {});
     updateDragRegions();
   }
 

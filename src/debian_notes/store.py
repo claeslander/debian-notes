@@ -370,6 +370,41 @@ class Store:
         )
         return note_id
 
+    def import_state(self, source):
+        """external_id -> local state of every note ever imported from source (also locally deleted ones)."""
+        rows = self.db.execute(
+            "SELECT i.external_id, i.note_id, i.modified, n.id AS present, n.updated_at, n.deleted_at,"
+            " n.folder_id, n.pinned FROM imports i LEFT JOIN notes n ON n.id = i.note_id WHERE i.source = ?",
+            (source,),
+        )
+        return {r["external_id"]: {
+            "note_id": r["note_id"], "modified": r["modified"], "present": r["present"] is not None,
+            "updated_at": r["updated_at"], "deleted_at": r["deleted_at"], "folder_id": r["folder_id"],
+            "pinned": bool(r["pinned"]),
+        } for r in rows}
+
+    def forget_import(self, source, external_id):
+        self.db.execute("DELETE FROM imports WHERE source = ? AND external_id = ?", (source, external_id))
+
+    def mapping(self, source):
+        """Generic external id -> local id map stored in the imports table (used for folders)."""
+        return {r["external_id"]: r["note_id"] for r in
+                self.db.execute("SELECT external_id, note_id FROM imports WHERE source = ?", (source,))}
+
+    def set_mapping(self, source, external_id, local_id):
+        self.db.execute(
+            "INSERT INTO imports (source, external_id, note_id, modified) VALUES (?, ?, ?, 0)"
+            " ON CONFLICT(source, external_id) DO UPDATE SET note_id = excluded.note_id",
+            (source, external_id, local_id),
+        )
+
+    def folder_exists(self, folder_id):
+        return self.db.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone() is not None
+
+    def folder_name(self, folder_id):
+        r = self.db.execute("SELECT name FROM folders WHERE id = ?", (folder_id,)).fetchone()
+        return r["name"] if r else None
+
     # --------------------------------------------------------------- settings
 
     def settings(self):

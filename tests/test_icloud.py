@@ -35,6 +35,15 @@ def note_rec(name, folder, parts, **extra):
     return {"recordName": name, "recordType": "Note", "fields": fields}
 
 
+def bump(rec, text_parts=None, modified=1800000000000, **fields):
+    """A newer version of a note record, as iCloud would send it after an edit on the iPhone."""
+    new = note_rec(rec["recordName"], rec["fields"]["Folder"]["value"]["recordName"],
+                   text_parts or [("Changed\n", dict(style=0))]) if text_parts is not None else dict(rec, fields=dict(rec["fields"]))
+    new["fields"]["ModificationDate"] = {"value": modified, "type": "TIMESTAMP"}
+    new["fields"].update(fields)
+    return new
+
+
 class ImporterConversionTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -94,7 +103,10 @@ class ImporterConversionTest(unittest.TestCase):
         self.assertEqual(item["data"]["body"], "<h1>Focaccia</h1><div>Bake it #bakken #italian</div>")
         self.assertEqual(item["data"]["tags"], ["bakken", "italian"])
         self.assertEqual(item["modified"], 1700000000.0)
-        self.assertEqual(self.imp._folder_path(self.imp.records["N1"], self.imp._folders()), ["Cookin", "Pasta"])
+        local = self.imp._resolve_folder("F2", self.imp._folders(), True)
+        folders = {f["id"]: f for f in self.store.folders()}
+        self.assertEqual(folders[local]["name"], "Pasta")
+        self.assertEqual(folders[folders[local]["parentId"]]["name"], "Cookin")
 
     def test_save_imported_note_dedupes(self):
         f = self.store.find_or_create_folder("Cookin")
@@ -104,6 +116,69 @@ class ImporterConversionTest(unittest.TestCase):
         same = self.store.save_imported_note("icloud", "N1", f, {"title": "B"}, 1.0, 3.0, note_id=nid)
         self.assertEqual(same, nid)
         self.assertEqual(self.store.note_meta(nid)["title"], "B")
+
+
+class PullSyncTest(ImporterConversionTest):
+    def sync(self, touched=(), removed=(), full=False, force=()):
+        return self.imp._apply_changes(set(touched), set(force), set(removed), full)
+
+    def note(self, ext="N1"):
+        st = self.store.import_state("icloud").get(ext)
+        return st and self.store.note_row(st["note_id"])
+
+    def test_first_sync_adds_notes(self):
+        stats = self.sync(full=True)
+        self.assertEqual(stats["added"], 1)  # locked and trashed notes are skipped
+        self.assertIn("Focaccia", self.note()["body"])
+
+    def test_remote_edit_updates_in_place(self):
+        self.sync(full=True)
+        nid = self.note()["id"]
+        self.imp.records["N1"] = bump(self.imp.records["N1"], [("Focaccia v2\n", dict(style=0))])
+        stats = self.sync(touched=["N1"])
+        self.assertEqual((stats["updated"], stats["conflicts"]), (1, 0))
+        self.assertEqual(self.note()["id"], nid)
+        self.assertIn("Focaccia v2", self.note()["body"])
+
+    def test_conflict_keeps_both_versions(self):
+        self.sync(full=True)
+        local = self.note()
+        self.store.db.execute("UPDATE notes SET body = '<h1>Mine</h1>', updated_at = ? WHERE id = ?",
+                              (local["updated_at"] + 100, local["id"]))
+        self.imp.records["N1"] = bump(self.imp.records["N1"], [("Theirs\n", dict(style=0))])
+        stats = self.sync(touched=["N1"])
+        self.assertEqual(stats["conflicts"], 1)
+        self.assertEqual(self.store.note_row(local["id"])["body"], "<h1>Mine</h1>")
+        self.assertIn("Theirs", self.note()["body"])
+        self.assertNotEqual(self.note()["id"], local["id"])
+
+    def test_deleted_on_iphone_goes_to_trash(self):
+        self.sync(full=True)
+        self.imp.records["N1"] = bump(self.imp.records["N1"], Deleted={"value": 1, "type": "INT64"})
+        stats = self.sync(touched=["N1"])
+        self.assertEqual(stats["removed"], 1)
+        self.assertIsNotNone(self.note()["deleted_at"])
+        # A record removed outright (tombstone) behaves the same.
+        self.store.db.execute("UPDATE notes SET deleted_at = NULL")
+        del self.imp.records["N1"]
+        self.assertEqual(self.sync(removed=["N1"])["removed"], 1)
+
+    def test_pin_and_folder_rename(self):
+        self.sync(full=True)
+        self.imp.records["US1"] = {"recordName": "US1", "recordType": "Note_UserSpecific",
+                                   "fields": {"Note": ref("N1"), "IsPinned": {"value": 1, "type": "INT64"}}}
+        self.imp.records["F2"]["fields"]["TitleEncrypted"] = enc("Pasta & Risotto")
+        self.sync(touched=["N1"])
+        self.assertEqual(self.note()["pinned"], 1)
+        names = {f["name"] for f in self.store.folders()}
+        self.assertIn("Pasta & Risotto", names)
+        self.assertNotIn("Pasta", names)
+
+    def test_permanently_deleted_here_stays_deleted(self):
+        self.sync(full=True)
+        self.store.delete_note(self.note()["id"])
+        self.imp.records["N1"] = bump(self.imp.records["N1"], [("Again\n", {})])
+        self.assertEqual(self.sync(touched=["N1"], full=True)["added"], 0)
 
 
 if __name__ == "__main__":

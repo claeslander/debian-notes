@@ -9,7 +9,7 @@
 
   const fresh = () => ({
     step: 'welcome', waiting: false, notice: '', account: null, records: 0, plan: null,
-    selected: new Set(), keepFolders: true, skipExisting: true, includeDeleted: false,
+    selected: new Set(), keepFolders: true, skipExisting: true, includeDeleted: false, sync: true,
     progress: { done: 0, total: 0, title: '' }, result: null, error: null, busy: false,
   });
 
@@ -84,6 +84,7 @@
       case 'import-done':
         go('done', { result: ev });
         N.app.reloadData();
+        N.call('icloudSyncState').then((s) => N.sync.onStatus(s));
         break;
       case 'cancelled':
         if (st.step === 'scanning') go('welcome');
@@ -124,7 +125,7 @@
       go('importing', { progress: { done: 0, total: importCount(), title: '' } });
       N.send('icloudImport', {
         folders: Array.from(st.selected), keepFolders: st.keepFolders,
-        skipExisting: st.skipExisting, includeDeleted: st.includeDeleted,
+        skipExisting: st.skipExisting, includeDeleted: st.includeDeleted, sync: st.sync,
       });
     } else if (action === 'show-notes') {
       close();
@@ -142,6 +143,7 @@
     } else if (t.name === 'keepFolders') st.keepFolders = t.checked;
     else if (t.name === 'skipExisting') st.skipExisting = t.checked;
     else if (t.name === 'includeDeleted') st.includeDeleted = t.checked;
+    else if (t.name === 'sync') st.sync = t.checked;
     render();
   }
 
@@ -238,6 +240,7 @@
           <button class="imp-link" data-do="select-all">${st.selected.size === allCount ? 'Deselect All' : 'Select All'}</button></div>
         <div class="imp-folders">${rows || '<div class="imp-empty">No notes found in iCloud.</div>'}</div>
         <div class="imp-options">
+          <label><input type="checkbox" name="sync"${st.sync ? ' checked' : ''}><span>Keep in sync with iCloud<small>New and changed notes in these folders are downloaded automatically. Nothing is sent to iCloud.</small></span></label>
           <label><input type="checkbox" name="keepFolders"${st.keepFolders ? ' checked' : ''}><span>Keep my iCloud folders<small>Otherwise everything goes into one folder called “iCloud”.</small></span></label>
           <label><input type="checkbox" name="skipExisting"${st.skipExisting ? ' checked' : ''}><span>Skip notes I've already imported<small>${p.alreadyImported ? `${p.alreadyImported} already imported — changed ones are updated.` : 'Changed notes are updated instead of duplicated.'}</small></span></label>
           ${p.deleted ? `<label><input type="checkbox" name="includeDeleted"${st.includeDeleted ? ' checked' : ''}><span>Also import Recently Deleted<small>${p.deleted} ${p.deleted === 1 ? 'note goes' : 'notes go'} to Recently Deleted here too.</small></span></label>` : ''}

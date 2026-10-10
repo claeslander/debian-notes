@@ -22,6 +22,7 @@ from gi.repository import GLib, Gtk, WebKit2
 from . import applenotes as an
 
 SOURCE = "icloud"
+FOLDER_SOURCE = "icloud-folder"
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
               "(KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 CLIENT_PARAMS = {"clientBuildNumber": "2420Hotfix12", "clientMasteringNumber": "2420Hotfix12"}
@@ -38,6 +39,10 @@ class Cancelled(Exception):
 
 
 class NotSignedIn(Exception):
+    pass
+
+
+class TokenExpired(Exception):
     pass
 
 
@@ -180,10 +185,11 @@ class CloudClient:
         name = ds.get("fullName") or " ".join(x for x in (ds.get("firstName"), ds.get("lastName")) if x)
         return {"name": name, "appleId": ds.get("appleId") or ds.get("primaryEmail") or ""}
 
-    def notes_records(self, on_progress, cancelled):
+    def notes_records(self, on_progress, cancelled, token=None):
+        """All records changed since `token` (everything when None). Returns (records, new_token)."""
         url = f"{self.ck_url}/database/1/com.apple.notes/production/private/changes/zone"
         params = dict(CLIENT_PARAMS, clientId=self.client_id, dsid=self.dsid)
-        token = None
+        incremental = token is not None
         records = []
         while True:
             if cancelled():
@@ -194,12 +200,14 @@ class CloudClient:
             res = self._request(url, body={"zones": [zone]}, params=params, timeout=120)
             z = (res.get("zones") or [{}])[0]
             if z.get("serverErrorCode"):
+                if incremental and z["serverErrorCode"] in ("CHANGE_TOKEN_EXPIRED", "BAD_REQUEST", "INVALID_ARGUMENTS"):
+                    raise TokenExpired()
                 raise RuntimeError(z.get("reason") or z["serverErrorCode"])
             records.extend(z.get("records") or [])
             on_progress(records)
-            token = z.get("syncToken")
-            if not z.get("moreComing") or not token:
-                return records
+            token = z.get("syncToken") or token
+            if not z.get("moreComing"):
+                return records, token
 
     def download(self, asset, filename="file"):
         url = asset["downloadURL"].replace("${f}", urllib.parse.quote(filename or "file"))
@@ -215,6 +223,8 @@ class WebSession:
     def __init__(self, data_dir):
         self.base = os.path.join(data_dir, "icloud-web")
         os.makedirs(self.base, exist_ok=True)
+        # The session cookies grant access to the iCloud account: keep them private to this user.
+        os.chmod(self.base, 0o700)
         self.manager = WebKit2.WebsiteDataManager(
             base_data_directory=os.path.join(self.base, "data"),
             base_cache_directory=os.path.join(self.base, "cache"),
@@ -284,6 +294,11 @@ class ICloudImporter:
         self.checking = False
         self.cancel_event = threading.Event()
         self.log_path = os.path.join(data_dir, "icloud-import-log.json")
+        self.cache_path = os.path.join(data_dir, "icloud-cache.json")
+        self.token = None
+        self.busy = False
+        self.sync_timer = None
+        self.sync_state = {"state": "idle", "last": self.store.get_setting("icloud.lastSync")}
 
     # ------------------------------------------------------------- events
 
@@ -313,7 +328,13 @@ class ICloudImporter:
             raise box["error"]
         return box["value"]
 
-    def _thread(self, target, *args):
+    def _thread(self, target, *args, exclusive=False):
+        if exclusive:
+            if self.busy:
+                self.emit("error", message="iCloud sync is running. Try again in a few seconds.")
+                return
+            self.busy = True
+
         def run():
             try:
                 target(*args)
@@ -326,6 +347,9 @@ class ICloudImporter:
                 traceback.print_exc()
                 self._log({"error": repr(exc), "trace": traceback.format_exc()})
                 self.emit("error", message=_friendly_error(exc))
+            finally:
+                if exclusive:
+                    self.busy = False
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -399,6 +423,13 @@ class ICloudImporter:
         self.client = None
         self.account = None
         self.records = None
+        self.token = None
+        try:
+            os.remove(self.cache_path)
+        except OSError:
+            pass
+        if self.sync_config().get("enabled"):
+            self._set_sync_state("signin-needed", message="Sign in to iCloud to keep syncing.")
         self.session.sign_out(lambda: self.emit("signed-out"))
 
     def cancel(self):
@@ -411,14 +442,14 @@ class ICloudImporter:
             self.emit("signin-needed")
             return
         self.cancel_event.clear()
-        self._thread(self._scan)
+        self._thread(self._scan, exclusive=True)
 
     def _scan(self):
         try:
             os.remove(self.log_path)  # one log per run
         except OSError:
             pass
-        records = self.client.notes_records(
+        records, token = self.client.notes_records(
             lambda recs: self.emit("scan-progress", notes=sum(
                 1 for r in recs if r.get("recordType") == "Note" and not r.get("deleted") and not rec_int(r, "Deleted"))),
             self.cancel_event.is_set)
@@ -427,6 +458,8 @@ class ICloudImporter:
             if rec.get("deleted") or not rec.get("recordName"):
                 continue
             self.records[rec["recordName"]] = rec
+        self.token = token
+        self._save_cache()
         self._log({"scan": _shape(records)})
         self.emit("scan-done", **self._plan())
 
@@ -505,13 +538,19 @@ class ICloudImporter:
             self.emit("error", message="Scan your iCloud notes first.")
             return
         self.cancel_event.clear()
-        self._thread(self._import, options or {})
+        self._thread(self._import, options or {}, exclusive=True)
 
     def _import(self, options):
         chosen = set(options.get("folders") or [])
         include_deleted = bool(options.get("includeDeleted"))
         skip_existing = options.get("skipExisting", True)
         keep_folders = options.get("keepFolders", True)
+        if options.get("sync") is not None:
+            all_folders = {f["id"] for f in self._plan()["folders"] if f["count"]}
+            cfg = dict(self.sync_config(), enabled=bool(options["sync"]), keepFolders=keep_folders,
+                       folders=None if not chosen or chosen >= all_folders else sorted(chosen))
+            self._on_main(lambda: self.store.set_setting("icloud.sync", cfg))
+            GLib.idle_add(self.schedule)
         imported = self._on_main(lambda: self.store.imported(SOURCE))
         folders = self._folders()
         pinned = {rec_ref(r, "Note") for r in self.records.values()
@@ -545,7 +584,8 @@ class ICloudImporter:
                 stats["failed"] += 1
                 self._log({"note_error": rec["recordName"], "error": repr(exc), "trace": traceback.format_exc()})
                 continue
-            item["folder_path"] = self._folder_path(rec, folders) if keep_folders else ["iCloud"]
+            item["folder"] = self._note_folder(rec)
+            item["keep_folders"] = keep_folders
             item["deleted"] = self._is_deleted(rec)
             item["previous"] = imported.get(rec["recordName"], (None,))[0]
             item["pinned"] = rec["recordName"] in pinned
@@ -558,49 +598,317 @@ class ICloudImporter:
             self._write(batch, stats)
         cancelled = self.cancel_event.is_set()
         self.emit("import-done", stats=stats, cancelled=cancelled)
+        if self.sync_config().get("enabled"):
+            self._set_sync_state("idle", last=time.time())
 
-    def _folder_path(self, rec, folders):
-        path, seen = [], set()
-        fid = self._note_folder(rec)
-        if fid == TRASH_FOLDER:
-            fid = DEFAULT_FOLDER
-        while fid and fid in folders and fid not in seen:
-            seen.add(fid)
-            path.insert(0, None if fid == DEFAULT_FOLDER else folders[fid]["name"])
-            fid = folders[fid]["parentId"]
-        return [p for p in path if p is not None] or []
+    def _resolve_folder(self, fid, folders, keep_folders, stats=None):
+        """Local folder id for an iCloud folder (main thread). iCloud folders are tracked by id, so a
+        rename in iCloud renames the local folder too."""
+        if not keep_folders:
+            return self.store.find_or_create_folder("iCloud")
+        if fid == TRASH_FOLDER or fid == DEFAULT_FOLDER or fid not in folders:
+            return self.store.default_folder_id()
+        info = folders[fid]
+        local = self.store.mapping(FOLDER_SOURCE).get(fid)
+        if local is not None and self.store.folder_exists(local):
+            if self.store.folder_name(local) != info["name"]:
+                try:
+                    self.store.rename_folder(local, info["name"])
+                except ValueError:
+                    pass
+            return local
+        parent = None
+        if info["parentId"] and info["parentId"] in folders and info["parentId"] != DEFAULT_FOLDER:
+            parent = self._resolve_folder(info["parentId"], folders, keep_folders, stats)
+        before = len(self.store.folders())
+        local = self.store.find_or_create_folder(info["name"], parent)
+        if stats is not None:
+            stats["folders"] = stats.get("folders", 0) + len(self.store.folders()) - before
+        self.store.set_mapping(FOLDER_SOURCE, fid, local)
+        return local
 
     def _write(self, items, stats):
         """DB writes happen on the main thread; block this worker until they are done."""
-        done = threading.Event()
+        folders = self._folders()
 
         def write():
-            try:
-                cache = {}
-                for item in items:
-                    key = tuple(item["folder_path"])
-                    if key not in cache:
-                        parent = None
-                        for name in item["folder_path"]:
-                            before = len(self.store.folders())
-                            parent = self.store.find_or_create_folder(name, parent)
-                            stats["folders"] += len(self.store.folders()) - before
-                        cache[key] = parent if parent is not None else self.store.default_folder_id()
-                    note_id = self.store.save_imported_note(
-                        SOURCE, item["id"], cache[key], item["data"], item["created"], item["modified"],
-                        note_id=item["previous"])
-                    if item["deleted"]:
-                        self.store.db.execute("UPDATE notes SET deleted_at = ? WHERE id = ?", (time.time(), note_id))
-                    elif item.get("pinned"):
-                        self.store.db.execute("UPDATE notes SET pinned = 1 WHERE id = ?", (note_id,))
-                    stats["updated" if item["previous"] else "notes"] += 1
-                self.store.commit()
-            finally:
-                done.set()
-            return False
+            for item in items:
+                folder_id = self._resolve_folder(item["folder"], folders, item["keep_folders"], stats)
+                note_id = self.store.save_imported_note(
+                    SOURCE, item["id"], folder_id, item["data"], item["created"], item["modified"],
+                    note_id=item["previous"])
+                if item["deleted"]:
+                    self.store.db.execute("UPDATE notes SET deleted_at = ? WHERE id = ?", (time.time(), note_id))
+                elif item.get("pinned"):
+                    self.store.db.execute("UPDATE notes SET pinned = 1 WHERE id = ?", (note_id,))
+                stats["updated" if item["previous"] else "notes"] += 1
+            self.store.commit()
 
-        GLib.idle_add(write)
-        done.wait()
+        self._on_main(write)
+
+    # -------------------------------------------------------------- sync
+
+    def sync_config(self):
+        cfg = self.store.get_setting("icloud.sync") if threading.current_thread() is threading.main_thread() \
+            else self._on_main(lambda: self.store.get_setting("icloud.sync"))
+        return dict({"enabled": False, "interval": 15, "keepFolders": True, "folders": None}, **(cfg or {}))
+
+    def set_sync_config(self, changes):
+        changes = changes or {}
+        cfg = dict(self.sync_config(), **{k: v for k, v in changes.items()
+                                          if k in ("enabled", "interval", "keepFolders", "folders")})
+        self.store.set_setting("icloud.sync", cfg)
+        self.schedule()
+        if cfg["enabled"] and changes.get("enabled"):
+            self.sync_now()
+        elif not cfg["enabled"]:
+            self._set_sync_state("off")
+        return cfg
+
+    def schedule(self):
+        """(Re)start the periodic sync timer according to the settings (main thread)."""
+        if self.sync_timer:
+            GLib.source_remove(self.sync_timer)
+            self.sync_timer = None
+        cfg = self.sync_config()
+        if not cfg["enabled"]:
+            return False
+        minutes = max(1, int(cfg.get("interval") or 15))
+        self.sync_timer = GLib.timeout_add_seconds(minutes * 60, self._tick)
+        return False
+
+    def _tick(self):
+        self.sync_now(quiet=True)
+        return True
+
+    def sync_now(self, quiet=False):
+        if self.busy:
+            return
+        self.busy = True
+        self._set_sync_state("syncing")
+
+        def run():
+            try:
+                self._sync()
+            except NotSignedIn:
+                self.client = None
+                self._set_sync_state("signin-needed", message="Sign in to iCloud to keep syncing.")
+            except urllib.error.URLError:
+                self._set_sync_state("offline", message="Can't reach iCloud right now.")
+            except Exception as exc:
+                traceback.print_exc()
+                self._log({"sync_error": repr(exc), "trace": traceback.format_exc()})
+                self._set_sync_state("error", message=_friendly_error(exc))
+            finally:
+                self.busy = False
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _set_sync_state(self, state, **extra):
+        self.sync_state = dict(self.sync_state, state=state, message=extra.pop("message", ""), **extra)
+        if "last" in extra:
+            GLib.idle_add(lambda: (self.store.set_setting("icloud.lastSync", extra["last"]), False)[1])
+        payload = json.dumps(self.sync_state)
+        GLib.idle_add(lambda: (self.win.eval_js(f"window.N && N.sync && N.sync.onStatus({payload})"), False)[1])
+
+    def _ensure_client(self):
+        if self.client is not None:
+            return
+        box, done = {}, threading.Event()
+
+        def got(cookies):
+            box["cookies"] = cookies
+            done.set()
+
+        GLib.idle_add(lambda: (self.session.get_cookies(got), False)[1])
+        done.wait(30)
+        cookies = box.get("cookies") or {}
+        if AUTH_COOKIE not in cookies:
+            raise NotSignedIn()
+        client = CloudClient(cookies)
+        self.account = client.validate()
+        self.client = client
+
+    def _load_cache(self):
+        try:
+            with open(self.cache_path, encoding="utf-8") as fh:
+                data = json.load(fh)
+            return data.get("records") or {}, data.get("token")
+        except (OSError, ValueError):
+            return None, None
+
+    def _save_cache(self):
+        tmp = self.cache_path + ".tmp"
+        try:
+            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as fh:
+                json.dump({"token": self.token, "records": self.records}, fh)
+            os.replace(tmp, self.cache_path)
+        except OSError:
+            pass
+
+    def _sync(self):
+        self._ensure_client()
+        if self.records is None:
+            self.records, self.token = self._load_cache()
+        full = self.records is None or not self.token
+        try:
+            delta, token = self.client.notes_records(lambda r: None, lambda: False, None if full else self.token)
+        except TokenExpired:
+            full = True
+            delta, token = self.client.notes_records(lambda r: None, lambda: False, None)
+        if full:
+            self.records = {}
+
+        removed, touched_notes, content_notes = set(), set(), set()
+        for rec in delta:
+            name = rec.get("recordName")
+            if not name:
+                continue
+            if rec.get("deleted"):
+                removed.add(name)
+                self.records.pop(name, None)
+                continue
+            self.records[name] = rec
+            kind = rec.get("recordType")
+            if kind == "Note":
+                touched_notes.add(name)
+            elif kind == "Attachment" or kind == "Media":
+                note = rec_ref(rec, "Note")
+                if note:
+                    content_notes.add(note)
+            elif kind == "Note_UserSpecific":
+                note = rec_ref(rec, "Note")
+                if note:
+                    touched_notes.add(note)
+        # Media records don't point at their note; find the attachment that uses them.
+        changed_media = {r.get("recordName") for r in delta if r.get("recordType") == "Media"}
+        if changed_media:
+            for rec in self.records.values():
+                if rec.get("recordType") == "Attachment" and rec_ref(rec, "Media") in changed_media:
+                    note = rec_ref(rec, "Note")
+                    if note:
+                        content_notes.add(note)
+        self.token = token
+
+        stats = self._apply_changes(touched_notes | content_notes, content_notes, removed, full)
+        self._save_cache()
+        self._log({"sync": stats})
+        self._set_sync_state("idle", last=time.time(), changes=stats)
+
+    def _apply_changes(self, touched, force_content, removed, full):
+        cfg = self.sync_config()
+        keep_folders = cfg.get("keepFolders", True)
+        allowed = set(cfg["folders"]) if cfg.get("folders") else None
+        state = self._on_main(lambda: self.store.import_state(SOURCE))
+        folders = self._folders()
+        pinned = {rec_ref(r, "Note") for r in self.records.values()
+                  if r.get("recordType") == "Note_UserSpecific" and rec_int(r, "IsPinned")}
+        stats = {"added": 0, "updated": 0, "removed": 0, "moved": 0, "conflicts": 0, "folders": 0,
+                 "notes": 0, "tables": 0, "attachments": 0, "skippedAttachments": 0, "failed": 0, "changed": []}
+        ops = []
+
+        candidates = set(touched) | set(removed)
+        if full:
+            candidates |= {r["recordName"] for r in self._notes()}
+        for name in candidates:
+            rec = self.records.get(name)
+            st = state.get(name)
+            if rec is not None and (rec.get("recordType") != "Note" or self._is_locked(rec)):
+                continue
+            gone = rec is None or self._is_deleted(rec)
+            if st is None:
+                # Not imported yet: pick up new notes in the synced folders.
+                if gone or (allowed is not None and self._note_folder(rec) not in allowed):
+                    continue
+                ops.append(("new", self._item(rec, stats, keep_folders, pinned)))
+                continue
+            if not st["present"]:
+                continue  # deleted permanently on this computer: respect that
+            edited_here = (st["updated_at"] or 0) > (st["modified"] or 0) + 1
+            if gone:
+                if st["deleted_at"]:
+                    continue
+                ops.append(("detach" if edited_here else "trash", name, st["note_id"]))
+                continue
+            remote_modified = rec_time(rec, "ModificationDate", "modified")
+            if remote_modified > (st["modified"] or 0) + 1 or name in force_content:
+                item = self._item(rec, stats, keep_folders, pinned)
+                if edited_here:
+                    ops.append(("conflict", name, st["note_id"], item))
+                else:
+                    item["previous"] = st["note_id"]
+                    ops.append(("update", item, bool(st["deleted_at"])))
+                continue
+            if st["deleted_at"]:
+                continue
+            ops.append(("meta", st["note_id"], self._note_folder(rec), keep_folders, name in pinned, st))
+
+        ops = [op for op in ops if op[0] != "new" or op[1] is not None]
+
+        def apply():
+            now = time.time()
+            for op in ops:
+                kind = op[0]
+                if kind == "new":
+                    item = op[1]
+                    fid = self._resolve_folder(item["folder"], folders, keep_folders, stats)
+                    nid = self.store.save_imported_note(SOURCE, item["id"], fid, item["data"], item["created"],
+                                                        item["modified"])
+                    if item["pinned"]:
+                        self.store.db.execute("UPDATE notes SET pinned = 1 WHERE id = ?", (nid,))
+                    stats["added"] += 1
+                elif kind == "update":
+                    item, was_trashed = op[1], op[2]
+                    if item is None:
+                        continue
+                    fid = self._resolve_folder(item["folder"], folders, keep_folders, stats)
+                    nid = self.store.save_imported_note(SOURCE, item["id"], fid, item["data"], item["created"],
+                                                        item["modified"], note_id=item["previous"])
+                    self.store.db.execute("UPDATE notes SET folder_id = ?, pinned = ?, deleted_at = NULL WHERE id = ?",
+                                          (fid, 1 if item["pinned"] else 0, nid))
+                    stats["updated"] += 1
+                    stats["changed"].append(nid)
+                elif kind == "conflict":
+                    name, local_id, item = op[1], op[2], op[3]
+                    if item is None:
+                        continue
+                    # Keep the version edited here as a normal local note; the iCloud version becomes a new note.
+                    self.store.forget_import(SOURCE, name)
+                    fid = self._resolve_folder(item["folder"], folders, keep_folders, stats)
+                    item["data"]["title"] = item["data"].get("title", "")
+                    self.store.save_imported_note(SOURCE, item["id"], fid, item["data"], item["created"],
+                                                  item["modified"])
+                    stats["conflicts"] += 1
+                elif kind == "trash":
+                    self.store.db.execute("UPDATE notes SET deleted_at = ?, pinned = 0 WHERE id = ?", (now, op[2]))
+                    stats["removed"] += 1
+                    stats["changed"].append(op[2])
+                elif kind == "detach":
+                    self.store.forget_import(SOURCE, op[1])
+                elif kind == "meta":
+                    local_id, remote_folder, keep, remote_pinned, st = op[1:]
+                    fid = self._resolve_folder(remote_folder, folders, keep, stats)
+                    if fid != st["folder_id"]:
+                        self.store.db.execute("UPDATE notes SET folder_id = ? WHERE id = ?", (fid, local_id))
+                        stats["moved"] += 1
+                    if remote_pinned != st["pinned"]:
+                        self.store.db.execute("UPDATE notes SET pinned = ? WHERE id = ?", (1 if remote_pinned else 0, local_id))
+                        stats["changed"].append(local_id)
+            self.store.commit()
+
+        self._on_main(apply)
+        return stats
+
+    def _item(self, rec, stats, keep_folders, pinned):
+        try:
+            item = self._convert(rec, stats)
+        except Exception as exc:
+            stats["failed"] += 1
+            self._log({"note_error": rec["recordName"], "error": repr(exc), "trace": traceback.format_exc()})
+            return None
+        item.update(folder=self._note_folder(rec), keep_folders=keep_folders, previous=None, deleted=False,
+                    pinned=rec["recordName"] in pinned)
+        return item
 
     # --------------------------------------------------------- conversion
 
