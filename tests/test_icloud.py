@@ -202,3 +202,83 @@ class PullSyncTest(ImporterConversionTest):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeCloud:
+    """Stands in for CloudClient: keeps records in memory, applies creates/updates like CloudKit."""
+
+    def __init__(self, records):
+        self.records = {r["recordName"]: dict(r, recordChangeTag="t1") for r in records}
+        self.ops = []
+
+    def lookup(self, names):
+        return [self.records[n] if n in self.records else {"recordName": n, "serverErrorCode": "NOT_FOUND"} for n in names]
+
+    def modify(self, ops):
+        for op in ops:
+            r = op["record"]
+            self.ops.append((op["operationType"], r["recordName"], sorted(r.get("fields", {}))))
+            if op["operationType"] == "update":
+                cur = self.records[r["recordName"]]
+                assert r.get("recordChangeTag") == cur["recordChangeTag"], "stale change tag"
+                cur["fields"] = dict(cur["fields"], **r["fields"])
+                cur["recordChangeTag"] = "t%d" % (int(cur["recordChangeTag"][1:]) + 1)
+            else:
+                self.records[r["recordName"]] = dict(r, recordChangeTag="t1")
+        return [op["record"] for op in ops]
+
+
+class PushChangesTest(unittest.TestCase):
+    def setUp(self):
+        from debian_notes import applenotes as an
+        self.an = an
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+        blob, _ = an.build_note_store([{"style": 0, "runs": [{"text": "Pasta"}]}, {"style": None, "runs": [{"text": "zout"}]}],
+                                      b"U" * 16, 1700000000, lambda: b"C" * 16)
+        rec = {"recordName": "N1", "recordType": "Note", "fields": {
+            "TitleEncrypted": enc("Pasta"), "TextDataEncrypted": enc(blob), "Folder": ref("DefaultFolder-CloudKit"),
+            "ModificationDate": {"value": 1700000000000, "type": "TIMESTAMP"}}}
+        self.cloud = FakeCloud([rec])
+        imp = object.__new__(icloud.ICloudImporter)
+        imp.store, imp.client, imp.records, imp.token, imp.busy = self.store, self.cloud, {}, None, False
+        imp.cache_path, imp.log_path = self.tmp.name + "/c.json", self.tmp.name + "/l.json"
+        imp._ensure_client = lambda: None
+        self.imp = imp
+        self.nid = self.store.save_imported_note("icloud", "N1", self.store.default_folder_id(),
+                                                 {"title": "Pasta", "body": "<h1>Pasta</h1><div>zout</div>"}, 1700000000.0, 1700000000.0)
+        self.store.commit()
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def paras(self, *lines):
+        return {"paragraphs": [{"style": 0 if i == 0 else None, "runs": [{"text": t}]} for i, t in enumerate(lines)]}
+
+    def test_send_changes(self):
+        res = self.imp._push_changes(self.nid, self.paras("Pasta", "zout en peper"))
+        self.assertEqual((res["ok"], res["verified"]), (True, True))
+        self.assertEqual(self.cloud.ops[-1][0], "update")
+        stored = icloud.rec_bytes(self.cloud.records["N1"], "TextDataEncrypted")
+        self.assertEqual(self.an.plain_text(self.an.parse_note_store(stored)), "Pasta\nzout en peper")
+        reasons = [v["reason"] for v in self.store.versions(self.nid)]
+        self.assertIn("before-push", reasons)
+        # Pull sync now sees the local copy as in sync (no false conflict).
+        st = self.store.import_state("icloud")["N1"]
+        self.assertGreaterEqual(st["modified"], st["updated_at"])
+        # Nothing changed -> nothing sent.
+        n_ops = len(self.cloud.ops)
+        self.assertTrue(self.imp._push_changes(self.nid, self.paras("Pasta", "zout en peper"))["unchanged"])
+        self.assertEqual(len(self.cloud.ops), n_ops)
+
+    def test_refuses_when_changed_on_iphone(self):
+        self.cloud.records["N1"]["fields"]["ModificationDate"] = {"value": 1800000000000, "type": "TIMESTAMP"}
+        with self.assertRaises(RuntimeError):
+            self.imp._push_changes(self.nid, self.paras("Pasta", "mine"))
+        self.assertEqual(self.cloud.ops, [])
+
+    def test_move_to_recently_deleted(self):
+        res = self.imp._push_trash(self.nid)
+        self.assertTrue(res["trashed"])
+        self.assertEqual(self.cloud.records["N1"]["fields"]["Folder"]["value"]["recordName"], "TrashFolder-CloudKit")

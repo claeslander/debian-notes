@@ -46,6 +46,16 @@ CREATE TABLE IF NOT EXISTS imports (
     modified     REAL NOT NULL,
     PRIMARY KEY (source, external_id)
 );
+CREATE TABLE IF NOT EXISTS versions (
+    id          INTEGER PRIMARY KEY,
+    note_id     INTEGER NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    created_at  REAL NOT NULL,
+    reason      TEXT NOT NULL,
+    title       TEXT NOT NULL DEFAULT '',
+    body        TEXT NOT NULL,
+    extra       TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_versions_note ON versions(note_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_notes_folder ON notes(folder_id);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON note_tags(tag);
 """
@@ -193,6 +203,8 @@ class Store:
     def save_note(self, note_id, data, locked_payload=None):
         """Store editor output. For locked notes the body arrives encrypted in locked_payload."""
         now = time.time()
+        if locked_payload is None:
+            self.maybe_snapshot_before_edit(note_id)
         if locked_payload is not None:
             self.db.execute(
                 "UPDATE notes SET title = ?, snippet = '', body = '', plain = '', thumbnail = NULL,"
@@ -228,6 +240,8 @@ class Store:
                 " thumbnail = NULL WHERE id = ?",
                 (payload, note_id),
             )
+            # Older versions hold the plaintext: a locked note keeps no history.
+            self.db.execute("DELETE FROM versions WHERE note_id = ?", (note_id,))
             self._set_tags(note_id, ())
         self.db.commit()
         return self.note_meta(note_id)
@@ -404,6 +418,51 @@ class Store:
     def folder_name(self, folder_id):
         r = self.db.execute("SELECT name FROM folders WHERE id = ?", (folder_id,)).fetchone()
         return r["name"] if r else None
+
+    # --------------------------------------------------------------- versions
+
+    VERSIONS_PER_NOTE = 100
+    EDIT_SNAPSHOT_EVERY = 600  # seconds between automatic snapshots while editing
+
+    def add_version(self, note_id, reason, title, body, extra=None):
+        """Keep a copy of a note's content. Never used for locked notes (it would store plaintext)."""
+        if not body or not body.strip():
+            return None
+        last = self.db.execute("SELECT body FROM versions WHERE note_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+                               (note_id,)).fetchone()
+        if last and last["body"] == body and extra is None:
+            return None
+        cur = self.db.execute("INSERT INTO versions (note_id, created_at, reason, title, body, extra) VALUES (?, ?, ?, ?, ?, ?)",
+                              (note_id, time.time(), reason, title or "", body, extra))
+        self.db.execute(
+            "DELETE FROM versions WHERE note_id = ? AND id NOT IN"
+            " (SELECT id FROM versions WHERE note_id = ? ORDER BY created_at DESC, id DESC LIMIT ?)",
+            (note_id, note_id, self.VERSIONS_PER_NOTE))
+        return cur.lastrowid
+
+    def snapshot_current(self, note_id, reason):
+        """Save the note's current body as a version (skipped for locked notes)."""
+        r = self.db.execute("SELECT title, body, locked FROM notes WHERE id = ?", (note_id,)).fetchone()
+        if r and not r["locked"]:
+            return self.add_version(note_id, reason, r["title"], r["body"])
+        return None
+
+    def maybe_snapshot_before_edit(self, note_id):
+        r = self.db.execute("SELECT max(created_at) AS t FROM versions WHERE note_id = ?", (note_id,)).fetchone()
+        if r["t"] is None or time.time() - r["t"] >= self.EDIT_SNAPSHOT_EVERY:
+            self.snapshot_current(note_id, "edit")
+
+    def versions(self, note_id):
+        return [{"id": r["id"], "createdAt": r["created_at"], "reason": r["reason"], "title": r["title"]}
+                for r in self.db.execute("SELECT id, created_at, reason, title FROM versions WHERE note_id = ?"
+                                         " ORDER BY created_at DESC, id DESC", (note_id,))]
+
+    def version(self, version_id):
+        r = self.db.execute("SELECT * FROM versions WHERE id = ?", (version_id,)).fetchone()
+        if r is None:
+            raise KeyError(f"No version {version_id}")
+        return {"id": r["id"], "noteId": r["note_id"], "createdAt": r["created_at"], "reason": r["reason"],
+                "title": r["title"], "body": r["body"]}
 
     # --------------------------------------------------------------- settings
 

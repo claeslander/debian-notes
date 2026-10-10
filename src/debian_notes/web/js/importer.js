@@ -96,6 +96,7 @@
         go('done', { result: ev });
         N.app.reloadData();
         N.call('icloudSyncState').then((s) => N.sync.onStatus(s));
+        N.app.refreshTracked && N.app.refreshTracked();
         break;
       case 'cancelled':
         if (st.step === 'scanning') go('welcome');

@@ -201,3 +201,60 @@ class EncodingTest(unittest.TestCase):
         clock = note.msg(4).msgs(1)[0]
         self.assertEqual((clock.bytes(1), [c.int(1) for c in clock.msgs(2)]), (b"U" * 16, [n16, 1]))
         self.assertEqual(sum(r.int(1) for r in note.msgs(5)), n16)
+
+
+class EditTest(unittest.TestCase):
+    ME = b"M" * 16
+
+    def fresh(self):
+        paras = [{"style": 0, "runs": [{"text": "Boodschappen"}]}, {"style": None, "runs": [{"text": "melk en brood"}]}]
+        blob, text = an.build_note_store(paras, b"U" * 16, 1790000000, lambda: b"C" * 16)
+        return blob
+
+    def edit(self, blob, lines):
+        paras = [{"style": 0 if i == 0 else None, "runs": [{"text": t}]} for i, t in enumerate(lines)]
+        return an.edit_note_store(blob, paras, self.ME, 1790000100, lambda: b"C" * 16)
+
+    def visible(self, blob):
+        note = an.parse_note_store(blob)
+        subs = an._subs(note)
+        return [(s["replica"], s["clock"], s["length"], s["tomb"]) for s in (subs[i] for i in an._chain(subs))]
+
+    def test_insert_delete_replace(self):
+        blob = self.fresh()
+        new, text, changed = self.edit(blob, ["Boodschappen", "melk, eieren en brood"])
+        self.assertTrue(changed)
+        self.assertEqual(text, "Boodschappen\nmelk, eieren en brood")
+        note = an.parse_note_store(new)
+        self.assertEqual(an.plain_text(note), text)
+        self.assertIn("<h1>Boodschappen</h1>", an.note_to_html(note))
+        chain = self.visible(new)
+        # Original text stays under replica 1; our insertions use our replica (index 2) — nothing renumbered.
+        self.assertEqual(chain[0], (0, 0, 0, 0))
+        self.assertEqual(chain[-1], (0, an.SENTINEL_END, 0, 0))
+        self.assertTrue(any(r == 2 and t == 0 for r, _, _, t in chain))
+        self.assertTrue(all(r in (0, 1, 2) for r, _, _, _ in chain))
+        clocks = an._clocks(note)
+        self.assertEqual([c[0] for c in clocks], [b"U" * 16, self.ME])
+        self.assertEqual(clocks[1][1][1][0], 1)  # our timestamp clock advanced
+
+        # A second edit: deletes leave tombstones, new ids continue after the previous ones.
+        new2, text2, _ = self.edit(new, ["Boodschappen", "eieren"])
+        self.assertEqual(an.plain_text(an.parse_note_store(new2)), text2)
+        chain2 = self.visible(new2)
+        self.assertTrue(any(t == 1 for *_, t in chain2))
+        ours = [c for r, c, l, t in chain2 if r == 2]
+        self.assertEqual(len(set(ours)), len(ours))
+        self.assertEqual(an._clocks(an.parse_note_store(new2))[1][1][1][0], 2)
+
+    def test_unchanged_text_reports_no_change(self):
+        blob = self.fresh()
+        _, _, changed = self.edit(blob, ["Boodschappen", "melk en brood"])
+        self.assertFalse(changed)
+
+    def test_refuses_attachments(self):
+        parts = [("Intro\n", {}), ("￼", dict(attachment=("A", "com.apple.notes.table")))]
+        text = "".join(p[0] for p in parts)
+        blob = note_store(text, [run(u16(t), **kw) for t, kw in parts])
+        with self.assertRaises(ValueError):
+            self.edit(blob, ["Intro", "x"])

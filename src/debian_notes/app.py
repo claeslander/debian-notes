@@ -95,6 +95,17 @@ class Api:
             return self.store.save_note(note_id, data, crypto.encrypt(self.keys, data.get("body", "")))
         return self.store.save_note(note_id, data)
 
+    def noteVersions(self, note_id):
+        return self.store.versions(note_id)
+
+    def noteVersion(self, version_id):
+        return self.store.version(version_id)
+
+    def snapshotNote(self, note_id, reason):
+        """Save the current content as a version (e.g. right before restoring an older one)."""
+        self.store.snapshot_current(note_id, reason)
+        self.store.commit()
+
     def deleteNote(self, note_id, permanently=False):
         if permanently:
             self.store.delete_note(note_id)
@@ -305,6 +316,16 @@ class Api:
 
     def icloudPushNote(self, note_id, payload):
         self._icloud().push_note(note_id, payload)
+
+    def icloudPushChanges(self, note_id, payload):
+        self._icloud().push_changes(note_id, payload)
+
+    def icloudPushTrash(self, note_id):
+        self._icloud().push_trash(note_id)
+
+    def icloudTrackedIds(self):
+        """Local note ids that mirror an iCloud note."""
+        return [st["note_id"] for st in self.store.import_state("icloud").values() if st["present"]]
 
     def icloudRemovePushed(self):
         self._icloud().remove_pushed()

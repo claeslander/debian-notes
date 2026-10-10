@@ -45,6 +45,7 @@
     app.style.setProperty('--sidebar-w', (S.settings.sidebarWidth || 220) + 'px');
     app.style.setProperty('--list-w', (S.settings.listWidth || 300) + 'px');
     body.classList.toggle('sidebar-hidden', S.settings.sidebarVisible === false);
+    body.classList.toggle('glass', S.settings.translucentSidebar !== false);
     body.classList.toggle('view-gallery', S.view === 'gallery');
     body.classList.toggle('gallery-open', S.view === 'gallery' && S.galleryOpen);
     N.$('[data-action="viewList"]').classList.toggle('active', S.view === 'list');
@@ -77,12 +78,94 @@
   const pushEnabled = () => !!S.settings.icloudTestPush;
   let pushed = new Set();
 
+  let tracked = new Set();  // local notes that mirror an iCloud note
+
+  A.refreshTracked = () => N.call('icloudTrackedIds').then((ids) => { tracked = new Set(ids); }).catch(() => {});
+
   function pushMenuItems(id = S.currentNoteId) {
-    if (!pushEnabled() || id == null) return [];
-    const n = S.notes.get(id);
+    const n = id != null ? S.notes.get(id) : null;
     if (!n || n.deletedAt || n.locked) return [];
-    if (pushed.has(id)) return ['-', { label: 'Sent to iCloud (Test)', disabled: true, icon: 'cloud' }];
-    return ['-', { label: 'Send to iCloud (Test)…', icon: 'cloud', action: () => pushNote(id) }];
+    const items = ['-', { label: 'Version History…', icon: 'undo', action: () => showVersions(id) }];
+    if (!pushEnabled()) return items;
+    if (tracked.has(id) || pushed.has(id)) items.push({ label: 'Send Changes to iCloud (Test)…', icon: 'cloud', action: () => pushChanges(id) });
+    else items.push({ label: 'Send to iCloud (Test)…', icon: 'cloud', action: () => pushNote(id) });
+    return items;
+  }
+
+  async function pushChanges(id) {
+    if (S.currentNoteId !== id) await A.selectNote(id);
+    await N.editor.flush();
+    const root = N.editor.root();
+    if (!root) return;
+    const ok = await N.ui.confirm('Send your changes to iCloud?',
+      'Experimental: your edits are applied to this note in iCloud, the same way an iPhone would. ' +
+      'The current iCloud version is saved in Version History first, so you can always go back.', 'Send Changes');
+    if (!ok) return;
+    N.ui.toast('Sending changes to iCloud…');
+    N.send('icloudPushChanges', id, { paragraphs: N.convert.toAppleParagraphs(root) });
+  }
+
+  // Deleting a note that also lives in iCloud: optionally move the iCloud copy to Recently Deleted too.
+  A.confirmICloudDelete = async function (id) {
+    if (!pushEnabled() || !tracked.has(id)) return true;
+    const r = await N.ui.sheet({
+      icon: 'cloud', title: 'Also delete this note in iCloud?',
+      message: 'It will be moved to Recently Deleted in iCloud as well, like deleting it on your iPhone. You can recover it there for 30 days.',
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Only Here', value: 'local' }, { label: 'Also in iCloud', value: 'both', primary: true, danger: true }],
+    });
+    if (r.button === null) return false;
+    if (r.button === 'both') N.send('icloudPushTrash', id);
+    return true;
+  };
+
+  // ------------------------------------------------------------ version history
+
+  const REASONS = {
+    edit: 'Edited here', 'before-push': 'iCloud version before sending', pushed: 'Sent to iCloud',
+    'before-sync': 'Before an iCloud update', 'before-restore': 'Before restoring',
+  };
+
+  async function showVersions(id) {
+    if (S.currentNoteId !== id) await A.selectNote(id);
+    await N.editor.flush();
+    const list = await N.call('noteVersions', id);
+    if (!list.length) {
+      N.ui.alert('No earlier versions yet', 'Versions are saved automatically while you edit (at most every 10 minutes), and before any change from or to iCloud.');
+      return;
+    }
+    const fmt = (ts) => N.date.long(ts);
+    let selected = list[0].id;
+    const html = `<div class="versions">
+      <div class="versions-list">${list.map((v) => `<button class="version-row" data-v="${v.id}">
+        <b>${N.esc(fmt(v.createdAt))}</b><span>${N.esc(REASONS[v.reason] || v.reason)}</span></button>`).join('')}</div>
+      <div class="versions-preview editor"></div></div>`;
+    const res = await N.ui.sheet({
+      title: 'Version History', icon: false, wide: true, html,
+      buttons: [{ label: 'Close', value: null }, { label: 'Restore This Version', value: 'restore', primary: true }],
+      onOpen(sheet) {
+        sheet.classList.add('versions-sheet');
+        const preview = sheet.querySelector('.versions-preview');
+        const pick = async (vid) => {
+          selected = vid;
+          sheet.querySelectorAll('.version-row').forEach((b) => b.classList.toggle('active', +b.dataset.v === vid));
+          preview.innerHTML = (await N.call('noteVersion', vid)).body;
+          preview.scrollTop = 0;
+        };
+        sheet.querySelector('.versions-list').addEventListener('click', (e) => {
+          const b = e.target.closest('[data-v]');
+          if (b) pick(+b.dataset.v);
+        });
+        pick(selected);
+      },
+    });
+    if (res.button !== 'restore') return;
+    const v = await N.call('noteVersion', selected);
+    await N.call('snapshotNote', id, 'before-restore');
+    const n = S.notes.get(id);
+    N.editor.mount(n, v.body, { readOnly: false });
+    N.editor.changed();
+    await N.editor.flush();
+    N.ui.toast('Version restored');
   }
 
   async function pushNote(id) {
@@ -110,7 +193,16 @@
       N.ui.alert('Couldn’t send to iCloud', res.message || 'Something went wrong.');
       return;
     }
+    if (res.unchanged) { N.ui.toast('Nothing to send — iCloud already has this version'); return; }
+    if (res.trashed) { N.ui.toast('Moved to Recently Deleted in iCloud'); A.refreshTracked(); return; }
+    if (res.updated) {
+      N.ui.alert('Changes sent to iCloud',
+        (res.verified ? 'iCloud stored exactly your text. ' : 'iCloud accepted the changes, but reading them back didn’t match — please check the note on your iPhone. ') +
+        'The previous iCloud version is in Version History if you need it.');
+      return;
+    }
     pushed.add(res.noteId);
+    A.refreshTracked();
     N.ui.alert('Sent to iCloud',
       `The note was created in the “${res.folder}” folder.` +
       (res.verified ? ' iCloud returned exactly the same text.' : ' iCloud accepted it, but reading it back didn’t match — please check it on your iPhone.') +
@@ -144,6 +236,7 @@
       const c = st.changes;
       if (st.state === 'idle' && prev.state === 'syncing' && c && (c.added || c.updated || c.removed || c.moved || c.conflicts || (c.changed || []).length)) {
         A.reloadData({ changed: c.changed || [] });
+        A.refreshTracked();
         const parts = [];
         if (c.added) parts.push(`${c.added} new`);
         if (c.updated) parts.push(`${c.updated} updated`);
@@ -332,6 +425,7 @@
         "This note will be deleted immediately. You can't undo this action.", 'Delete', true);
       if (!ok) return;
     }
+    if (!n.deletedAt && !(await A.confirmICloudDelete(id))) return;
     const next = neighbourOf(id);
     if (N.editor.noteId() === id) {
       await N.editor.flush();
@@ -818,6 +912,7 @@
           ${check('sortChecked', 'Sort checked items to the bottom', !!S.settings.sortChecked)}
           ${check('showCounts', 'Show note counts', S.settings.showCounts !== false)}
           ${check('slashCommands', 'Slash commands — type / to format a line', !!S.settings.slashCommands)}
+          ${check('translucentSidebar', 'Translucent sidebar', S.settings.translucentSidebar !== false)}
         </div></div>
         <div class="pref-row pref-top"><span>iCloud:</span><div class="pref-checks">
           ${check('icloudSync', 'Keep notes in sync with iCloud (download only)', !!(S.settings['icloud.sync'] || {}).enabled)}
@@ -863,6 +958,7 @@
           if (t.name === 'textSize') applyTextSize();
           if (['sortBy', 'groupByDate'].includes(t.name)) N.notelist.render();
           if (t.name === 'showCounts') N.sidebar.render();
+          if (t.name === 'translucentSidebar') applyLayout();
         });
         sheet.addEventListener('click', (e) => {
           if (e.target.closest('[data-pref="syncNow"]')) { N.send('icloudSyncNow'); return; }
@@ -1149,6 +1245,7 @@
     body.classList.add('ready');
     N.call('icloudSyncState').then((st) => N.sync.onStatus(st)).catch(() => {});
     N.call('icloudPushedIds').then((ids) => { pushed = new Set(ids); }).catch(() => {});
+    A.refreshTracked();
     updateDragRegions();
   }
 

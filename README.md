@@ -55,6 +55,12 @@ Tests: `python3 -m unittest discover -s tests`
   iCloud note in a “From Debian” folder from the open note (text and formatting; tables as text, no images).
   Existing iCloud notes are never edited. “Remove Test Notes from iCloud” deletes everything it created.
   Try it with a test Apple ID first.
+  “Send Changes to iCloud (Test)” applies local edits to an existing iCloud note as proper CRDT operations
+  (refused if the note changed in iCloud since the last sync, or has attachments/tables/hashtags), and deleting
+  an iCloud note can move it to Recently Deleted in iCloud too.
+- **Version history** for every note (Version History… in the note menu): snapshots while editing (at most every
+  10 minutes) and before every iCloud change in either direction, with preview and restore. Locked notes keep none.
+- Translucent sidebar (Settings), like macOS vibrancy.
 - Light and dark appearance following the system, adjustable text size, keyboard shortcuts for everything
 
 Data lives in `~/.local/share/debian-notes/` (`notes.db` plus an `attachments/` folder).

@@ -100,3 +100,35 @@ class CryptoTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class VersionTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_edit_snapshots_are_throttled_and_restorable(self):
+        n = self.store.create_note(self.store.default_folder_id())["id"]
+        self.store.save_note(n, {"title": "v1", "body": "<div>v1</div>"})
+        self.store.save_note(n, {"title": "v2", "body": "<div>v2</div>"})   # snapshot of v1 (first edit)
+        self.store.save_note(n, {"title": "v3", "body": "<div>v3</div>"})   # within 10 min: no new snapshot
+        versions = self.store.versions(n)
+        self.assertEqual([v["title"] for v in versions], ["v1"])
+        self.assertEqual(self.store.version(versions[0]["id"])["body"], "<div>v1</div>")
+        self.store.snapshot_current(n, "before-restore")
+        self.assertEqual(self.store.versions(n)[0]["reason"], "before-restore")
+
+    def test_locked_notes_get_no_versions(self):
+        n = self.store.create_note(self.store.default_folder_id())["id"]
+        self.store.save_note(n, {"title": "secret", "body": "<div>secret</div>"})
+        self.store.save_note(n, {"title": "secret 2", "body": "<div>secret 2</div>"})
+        self.assertTrue(self.store.versions(n))  # history exists before locking…
+        self.store.set_locked(n, "payload")
+        self.assertEqual(self.store.versions(n), [])  # …and is wiped when the note is locked
+        self.assertIsNone(self.store.snapshot_current(n, "edit"))
+        self.store.save_note(n, {"title": "secret"}, locked_payload="payload2")
+        self.assertEqual(self.store.versions(n), [])

@@ -505,3 +505,190 @@ def build_note_store(paragraphs, replica_uuid, timestamp, uuid_factory):
         b"".join(_fb(5, r) for r in runs)
     document = _fi(1, 0) + _fi(2, 0) + _fb(3, note)
     return gzip.compress(_fi(1, 0) + _fb(2, document)), text
+
+
+# ---------------------------------------------------------------------- editing
+
+# Editing an existing note means adding operations to its topotext CRDT, as another device would:
+# this app is its own replica. Removed characters stay in the sequence as tombstones; inserted text
+# becomes new substrings with our replica's character ids, placed right after the character they
+# follow. Attribute runs (formatting) are rewritten for the new visible text.
+
+
+def _subs(note):
+    out = []
+    for s in note.msgs(3):
+        cid, ts = s.msg(1) or Msg(), s.msg(3) or Msg()
+        out.append({"replica": cid.int(1), "clock": cid.int(2), "length": s.int(2),
+                    "ts_replica": ts.int(1), "ts_clock": ts.int(2), "tomb": s.int(4), "children": s.raw_list(5)})
+    return out
+
+
+def _chain(subs):
+    """Substring indices in document order, following child links from the start sentinel."""
+    order, seen, i = [], set(), 0
+    while i is not None and 0 <= i < len(subs) and i not in seen:
+        order.append(i)
+        seen.add(i)
+        kids = subs[i]["children"]
+        i = kids[0] if kids else None
+    if len(order) != len(subs):
+        raise ValueError("unsupported substring tree")
+    return order
+
+
+def _clocks(note):
+    vt = note.msg(4)
+    out = []
+    for c in vt.msgs(1) if vt else []:
+        out.append([c.bytes(1), [(rc.int(1), rc.int(2)) for rc in c.msgs(2)]])
+    return out
+
+
+def topotext_visible_length(note):
+    subs = _subs(note)
+    return sum(subs[i]["length"] for i in _chain(subs) if not subs[i]["tomb"])
+
+
+def _units(text):
+    b = text.encode("utf-16-le")
+    return [b[k:k + 2] for k in range(0, len(b), 2)]
+
+
+def _text_and_runs(paragraphs, timestamp, uuid_factory):
+    """Shared by build/edit: the note text and encoded attribute runs for a list of paragraphs."""
+    text_parts, runs = [], []
+    stamp = int(timestamp)
+    for i, para in enumerate(paragraphs):
+        style = para.get("style")
+        ps = b""
+        if style is not None:
+            ps += _fi(1, style)
+        ps += _fi(3, 1)
+        if para.get("indent"):
+            ps += _fi(4, para["indent"])
+        if style == STYLE_CHECKLIST:
+            ps += _fb(5, _fb(1, uuid_factory()) + _fi(2, 1 if para.get("checked") else 0))
+        pieces = [r for r in para.get("runs") or [] if r.get("text")]
+        if i < len(paragraphs) - 1:
+            if pieces:
+                pieces[-1] = dict(pieces[-1], text=pieces[-1]["text"] + "\n")
+            else:
+                pieces = [{"text": "\n"}]
+        for r in pieces:
+            t = r["text"].replace(OBJECT_REPLACEMENT, "")
+            if not t:
+                continue
+            body = _fi(1, len(t.encode("utf-16-le")) // 2) + _fb(2, ps)
+            weight = (1 if r.get("bold") else 0) | (2 if r.get("italic") else 0)
+            if weight:
+                body += _fi(5, weight)
+            if r.get("underline"):
+                body += _fi(6, 1)
+            if r.get("strike"):
+                body += _fi(7, 1)
+            if r.get("link"):
+                body += _fb(9, r["link"])
+            body += _fi(13, stamp)
+            runs.append(body)
+            text_parts.append(t)
+    return "".join(text_parts), runs
+
+
+def edit_note_store(old_blob, paragraphs, replica_uuid, timestamp, uuid_factory):
+    """Apply the new content to an existing note as CRDT operations. Returns (blob, text, changed)."""
+    root = Msg(decompress(old_blob))
+    doc = root.msg(2)
+    note = doc.msg(3) if doc else None
+    if note is None:
+        raise ValueError("not a note document")
+    old_text = note.str(2)
+    if OBJECT_REPLACEMENT in old_text:
+        raise ValueError("notes with attachments, tables or hashtags can't be edited yet")
+    subs = _subs(note)
+    order = _chain(subs)
+    old_units = _units(old_text)
+    if topotext_visible_length(note) != len(old_units):
+        raise ValueError("note structure doesn't match its text")
+
+    new_text, runs = _text_and_runs(paragraphs, timestamp, uuid_factory)
+    new_units = _units(new_text)
+    clocks = _clocks(note)
+    idx = next((k for k, c in enumerate(clocks) if c[0] == replica_uuid), None)
+    if idx is None:
+        clocks.append([replica_uuid, [(0, 0), (0, 0)]])
+        idx = len(clocks) - 1
+    me = idx + 1  # CharID.replica is a 1-based index into the version vector
+    next_char = clocks[idx][1][0][0] if clocks[idx][1] else 0
+    ts_clock = clocks[idx][1][1][0] if len(clocks[idx][1]) > 1 else 0
+
+    import difflib
+    keep = [True] * len(old_units)
+    inserts = {}  # old visible index the text goes after (-1 = at the start) -> list of units
+    for op, a0, a1, b0, b1 in difflib.SequenceMatcher(None, old_units, new_units, autojunk=False).get_opcodes():
+        if op in ("delete", "replace"):
+            for k in range(a0, a1):
+                keep[k] = False
+        if op in ("insert", "replace"):
+            inserts.setdefault(a1 - 1 if op == "replace" else a0 - 1, []).extend(new_units[b0:b1])
+    changed = bool(inserts) or not all(keep)
+
+    pieces = []
+
+    def insert_after(pos):
+        nonlocal next_char
+        units = inserts.pop(pos, None)
+        if units:
+            pieces.append({"replica": me, "clock": next_char, "length": len(units),
+                           "ts_replica": me, "ts_clock": ts_clock, "tomb": 0})
+            next_char += len(units)
+
+    vi = 0
+    for i in order:
+        s = subs[i]
+        if s["replica"] == 0 and s["clock"] == SENTINEL_END:
+            continue
+        if s["tomb"] or s["length"] == 0:
+            pieces.append(dict(s))  # tombstones and the start sentinel are kept as they are
+        if s["replica"] == 0 and s["clock"] == 0:
+            insert_after(-1)
+            continue
+        if s["tomb"] or s["length"] == 0:
+            continue
+        start = 0
+        for k in range(s["length"]):
+            last_of_group = k == s["length"] - 1 or keep[vi] != keep[vi + 1] or (vi in inserts)
+            if last_of_group:
+                alive = keep[vi]
+                pieces.append({"replica": s["replica"], "clock": s["clock"] + start, "length": k - start + 1,
+                               "ts_replica": s["ts_replica"] if alive else me,
+                               "ts_clock": s["ts_clock"] if alive else ts_clock, "tomb": 0 if alive else 1})
+                insert_after(vi)
+                start = k + 1
+            vi += 1
+    if inserts:
+        raise ValueError("couldn't place every insertion")
+    pieces.append({"replica": 0, "clock": SENTINEL_END, "length": 0, "ts_replica": 0, "ts_clock": SENTINEL_END, "tomb": 0})
+
+    enc_subs = []
+    for n, p in enumerate(pieces):
+        body = _fb(1, _char_id(p["replica"], p["clock"])) + _fi(2, p["length"]) + _fb(3, _char_id(p["ts_replica"], p["ts_clock"]))
+        if p["tomb"]:
+            body += _fi(4, 1)
+        if n < len(pieces) - 1:
+            body += _fi(5, n + 1)
+        enc_subs.append(body)
+
+    clocks[idx][1] = [(next_char, 0), (ts_clock + 1, 0)]
+    enc_clocks = b"".join(
+        _fb(1, _fb(1, uid) + b"".join(_fb(2, _fi(1, a) + (_fi(2, b) if b else b"")) for a, b in rcs)) for uid, rcs in clocks)
+    new_note = _fb(2, new_text) + b"".join(_fb(3, s) for s in enc_subs) + _fb(4, enc_clocks) + b"".join(_fb(5, r) for r in runs)
+    new_doc = _fi(1, doc.int(1)) + _fi(2, doc.int(2)) + _fb(3, new_note)
+    blob = gzip.compress(_fi(1, root.int(1)) + _fb(2, new_doc))
+
+    # Self-check: the visible characters must spell exactly the new text.
+    check = parse_note_store(blob)
+    if check.str(2) != new_text or topotext_visible_length(check) != len(new_units) or \
+            sum(r.int(1) for r in check.msgs(5)) != len(new_units):
+        raise ValueError("edited note failed its consistency check")
+    return blob, new_text, changed

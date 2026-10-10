@@ -9,6 +9,8 @@
   --list-w: 300px;
 
   --sidebar-bg: #eceae9;
+  --sidebar-glass: rgba(236, 234, 233, 0.72);
+  --sidebar-glass-inactive: rgba(236, 234, 233, 0.92);
   --list-bg: #ffffff;
   --editor-bg: #ffffff;
   --text: #1d1d1f;
@@ -58,6 +60,8 @@
 
 :root[data-theme="dark"] {
   --sidebar-bg: #2a292c;
+  --sidebar-glass: rgba(40, 38, 44, 0.68);
+  --sidebar-glass-inactive: rgba(40, 38, 44, 0.9);
   --list-bg: #1e1e1e;
   --editor-bg: #1e1e1e;
   --text: #e9e9eb;
@@ -120,6 +124,13 @@ body:not(.ready) #app { opacity: 0; }
 /* Rounded window: the GTK window is transparent and the page draws the corners. */
 body.rounded { background: transparent; }
 body.rounded #app { border-radius: 10px; overflow: hidden; background: var(--editor-bg); }
+/* Translucent sidebar: the window is transparent, so the desktop shows through the sidebar
+   (GNOME doesn't let apps blur what's behind them, so it's tinted rather than frosted). */
+body.rounded.glass #app { background: transparent; }
+body.rounded.glass #sidebar { background: var(--sidebar-glass); transition: background-color 0.2s; }
+body.rounded.glass.window-inactive #sidebar { background: var(--sidebar-glass-inactive); }
+body.rounded.glass .sb-row.active { background: rgba(0, 0, 0, 0.1); }
+:root[data-theme="dark"] body.rounded.glass .sb-row.active { background: rgba(255, 255, 255, 0.12); }
 body.rounded .sheet-backdrop { border-radius: 10px; }
 body.rounded.maximized #app, body.rounded.maximized .sheet-backdrop { border-radius: 0; }
 button { font: inherit; color: inherit; border: 0; background: none; padding: 0; cursor: default; }
@@ -270,6 +281,18 @@ body.resizing, body.resizing * { cursor: col-resize !important; }
 .pref-inline { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
 .pref-inline select { height: 24px; padding: 0 8px; border: 0; border-radius: 6px; background: var(--btn-bg);
   box-shadow: 0 0.5px 1.5px rgba(0, 0, 0, 0.18), inset 0 0 0 0.5px rgba(0, 0, 0, 0.08); }
+.sheet.versions-sheet { width: 780px; max-width: calc(100vw - 40px); }
+.versions { display: grid; grid-template-columns: 220px 1fr; gap: 12px; height: 380px; margin-top: 8px; }
+.versions-list { overflow-y: auto; border: 1px solid var(--separator); border-radius: 9px; padding: 4px; background: var(--editor-bg); }
+.version-row { display: flex; flex-direction: column; align-items: flex-start; width: 100%; padding: 7px 9px; border-radius: 6px; text-align: left; }
+.version-row b { font-size: 12.5px; font-weight: 600; }
+.version-row span { font-size: 11.5px; color: var(--secondary); }
+.version-row:hover { background: var(--hover); }
+.version-row.active { background: var(--sel-active); color: var(--sel-text); }
+.version-row.active span { color: inherit; opacity: 0.75; }
+.versions-preview { overflow-y: auto; border: 1px solid var(--separator); border-radius: 9px; padding: 14px 18px;
+  background: var(--editor-bg); user-select: text; font-size: calc(var(--editor-size) * 0.9); overflow-x: hidden; }
+.versions-preview img { max-width: 100%; }
 .pref-checks .pref-muted { font-size: 11.5px; max-width: 280px; line-height: 1.4; }
 .sb-new-folder { display: inline-flex; align-items: center; gap: 6px; color: var(--secondary); font-size: 13px; padding: 4px 6px; border-radius: 6px; }
 .sb-new-folder:hover { background: var(--hover); color: var(--text); }
