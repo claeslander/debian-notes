@@ -72,10 +72,70 @@
     }
   };
 
+  // ------------------------------------------------- iCloud test push
+
+  const pushEnabled = () => !!S.settings.icloudTestPush;
+  let pushed = new Set();
+
+  function pushMenuItems(id = S.currentNoteId) {
+    if (!pushEnabled() || id == null) return [];
+    const n = S.notes.get(id);
+    if (!n || n.deletedAt || n.locked) return [];
+    if (pushed.has(id)) return ['-', { label: 'Sent to iCloud (Test)', disabled: true, icon: 'cloud' }];
+    return ['-', { label: 'Send to iCloud (Test)…', icon: 'cloud', action: () => pushNote(id) }];
+  }
+
+  async function pushNote(id) {
+    if (S.currentNoteId !== id) await A.selectNote(id);
+    await N.editor.flush();
+    const root = N.editor.root();
+    if (!root) return;
+    const ok = await N.ui.confirm('Send this note to iCloud?',
+      'Experimental: a new note is created in the “From Debian” folder in iCloud. Your other iCloud notes are not touched. ' +
+      'Check it on your iPhone or Mac afterwards.', 'Send to iCloud');
+    if (!ok) return;
+    N.ui.toast('Sending to iCloud…');
+    N.send('icloudPushNote', id, { paragraphs: N.convert.toAppleParagraphs(root) });
+  }
+
+  N.sync = N.sync || {};
+  N.sync.onPush = function (res) {
+    if (res.removed !== undefined || (res.noteId == null && res.ok)) {
+      pushed = new Set();
+      N.ui.alert('Test notes removed', `${res.removed || 0} test ${res.removed === 1 ? 'note was' : 'notes were'} deleted from iCloud. The copies on this computer are kept.`);
+      return;
+    }
+    if (!res.ok) {
+      if (res.signin) { N.ui.toast('Sign in to iCloud first'); N.importer.open(); return; }
+      N.ui.alert('Couldn’t send to iCloud', res.message || 'Something went wrong.');
+      return;
+    }
+    pushed.add(res.noteId);
+    N.ui.alert('Sent to iCloud',
+      `The note was created in the “${res.folder}” folder.` +
+      (res.verified ? ' iCloud returned exactly the same text.' : ' iCloud accepted it, but reading it back didn’t match — please check it on your iPhone.') +
+      ' Open Notes on your iPhone or Mac to check that it looks right.');
+  };
+
+  async function enableTestPush(on) {
+    if (!on) { A.setSetting('icloudTestPush', false); return true; }
+    const r = await N.ui.sheet({
+      icon: 'cloudAlert', title: 'Enable test push to iCloud?',
+      message: 'This experimental feature creates new notes in your iCloud account, in a folder called “From Debian”. ' +
+        'It never edits or deletes your existing iCloud notes, but the format is reverse-engineered: a note could look wrong ' +
+        'or fail to open on your Apple devices. Trying it with a separate test Apple ID first is strongly recommended. ' +
+        'You can remove all test notes again from Settings.',
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Enable', value: 'ok', primary: true }],
+    });
+    if (r.button !== 'ok') return false;
+    A.setSetting('icloudTestPush', true);
+    return true;
+  }
+
   // ------------------------------------------------------------ iCloud sync
 
   const SYNC_ICON = { idle: 'cloud', syncing: 'sync', 'signin-needed': 'cloudAlert', error: 'cloudAlert', offline: 'cloudAlert' };
-  N.sync = {
+  N.sync = Object.assign(N.sync || {}, {
     state: { state: 'off' },
     onStatus(st) {
       const prev = N.sync.state;
@@ -92,7 +152,7 @@
         if (parts.length) N.ui.toast(`iCloud: ${parts.join(', ')}`);
       }
     },
-  };
+  });
 
   function relTime(ts) {
     if (!ts) return '';
@@ -359,6 +419,7 @@
       '-',
       { label: 'Move to', icon: 'folder', submenu: folderMenu((f) => A.moveNote(id, f.id), n.folderId) },
       { label: 'Duplicate Note', action: () => A.duplicateNote(id) },
+      ...pushMenuItems(id),
       '-',
       { label: 'Delete', icon: 'trash', shortcut: 'Ctrl+⌫', action: () => A.deleteNote(id) },
     ];
@@ -656,6 +717,7 @@
       { label: 'Copy as Markdown', action: () => copyText(N.convert.toMarkdown(N.editor.root())) },
       '-',
       { label: 'Print…', shortcut: 'Ctrl+P', action: () => N.send('print') },
+      ...pushMenuItems(),
     ]);
   }
 
@@ -762,7 +824,9 @@
           <div class="pref-inline">Check every ${sel('icloudInterval', [[5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, 'hour']], (S.settings['icloud.sync'] || {}).interval || 15)}</div>
           <div class="pref-inline"><button class="push-btn" data-pref="syncNow">Sync Now</button>
           <span class="pref-muted">${N.sync.state.last ? 'Last synced ' + relTime(N.sync.state.last) : ''}</span></div>
-          <span class="pref-muted">Changes made here are never sent to iCloud. If a note changes in both places, both versions are kept.</span>
+          <span class="pref-muted">Sync only downloads. If a note changes in both places, both versions are kept.</span>
+          ${check('icloudTestPush', 'Experimental: send notes to iCloud (test)', !!S.settings.icloudTestPush)}
+          ${S.settings.icloudTestPush ? '<div class="pref-inline"><button class="push-btn" data-pref="removePushed">Remove Test Notes from iCloud…</button></div>' : ''}
         </div></div>
         <div class="pref-row"><span>Locked notes:</span><div>
           ${S.lock.configured ? '<button class="push-btn" data-pref="changePassword">Change Password…</button>' : '<span class="pref-muted">No password set yet</span>'}
@@ -774,6 +838,17 @@
       onOpen(sheet) {
         sheet.addEventListener('change', (e) => {
           const t = e.target;
+          if (t.name === 'icloudTestPush') {
+            const want = t.checked;
+            enableTestPush(want).then((done) => {
+              if (!done) t.checked = !want;
+              const box = sheet.querySelector('[data-pref="removePushed"]');
+              if (want && done && !box) t.closest('.pref-checks').insertAdjacentHTML('beforeend',
+                '<div class="pref-inline"><button class="push-btn" data-pref="removePushed">Remove Test Notes from iCloud…</button></div>');
+              if (!want && box) box.parentElement.remove();
+            });
+            return;
+          }
           if (t.name === 'icloudSync' || t.name === 'icloudInterval') {
             const changes = t.name === 'icloudSync' ? { enabled: t.checked } : { interval: +t.value };
             N.call('icloudSetSync', changes).then((cfg) => {
@@ -791,6 +866,12 @@
         });
         sheet.addEventListener('click', (e) => {
           if (e.target.closest('[data-pref="syncNow"]')) { N.send('icloudSyncNow'); return; }
+          if (e.target.closest('[data-pref="removePushed"]')) {
+            N.ui.confirm('Remove test notes from iCloud?',
+              'Every note this app created in iCloud (and the “From Debian” folder) is deleted from iCloud. The copies on this computer stay.',
+              'Remove', true).then((ok) => ok && N.send('icloudRemovePushed'));
+            return;
+          }
           if (e.target.closest('[data-pref="changePassword"]')) {
             sheet.closest('.sheet-backdrop').remove();
             changePassword();
@@ -1067,6 +1148,7 @@
     document.getElementById('note-list').focus({ preventScroll: true });
     body.classList.add('ready');
     N.call('icloudSyncState').then((st) => N.sync.onStatus(st)).catch(() => {});
+    N.call('icloudPushedIds').then((ids) => { pushed = new Set(ids); }).catch(() => {});
     updateDragRegions();
   }
 

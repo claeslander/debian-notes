@@ -303,6 +303,16 @@ class Api:
     def icloudSetSync(self, changes):
         return self._icloud().set_sync_config(changes)
 
+    def icloudPushNote(self, note_id, payload):
+        self._icloud().push_note(note_id, payload)
+
+    def icloudRemovePushed(self):
+        self._icloud().remove_pushed()
+
+    def icloudPushedIds(self):
+        """Local note ids that were sent to iCloud with the test push."""
+        return [v for k, v in self.store.mapping("icloud-push").items() if not k.startswith("folder:")]
+
     def icloudSyncState(self):
         if self._icloud_importer is None and not (self.store.get_setting("icloud.sync") or {}).get("enabled"):
             return {"state": "off"}

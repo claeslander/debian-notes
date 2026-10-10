@@ -23,6 +23,8 @@ from . import applenotes as an
 
 SOURCE = "icloud"
 FOLDER_SOURCE = "icloud-folder"
+PUSH_SOURCE = "icloud-push"  # records this app created in iCloud (for the test push feature)
+PUSH_FOLDER_NAME = "From Debian"
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
               "(KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 CLIENT_PARAMS = {"clientBuildNumber": "2420Hotfix12", "clientMasteringNumber": "2420Hotfix12"}
@@ -208,6 +210,25 @@ class CloudClient:
             token = z.get("syncToken") or token
             if not z.get("moreComing"):
                 return records, token
+
+    def _db_url(self, op):
+        return f"{self.ck_url}/database/1/com.apple.notes/production/private/records/{op}"
+
+    def modify(self, operations):
+        """Run CloudKit record operations; raises with Apple's reason when one fails."""
+        res = self._request(self._db_url("modify"), body={"operations": operations, "zoneID": NOTES_ZONE, "atomic": True},
+                            params=dict(CLIENT_PARAMS, clientId=self.client_id, dsid=self.dsid))
+        records = res.get("records") or []
+        failed = [r for r in records if r.get("serverErrorCode")]
+        if failed:
+            raise RuntimeError("iCloud refused the change: " + "; ".join(
+                f"{r.get('serverErrorCode')} {r.get('reason') or ''}".strip() for r in failed))
+        return records
+
+    def lookup(self, names):
+        res = self._request(self._db_url("lookup"), body={"records": [{"recordName": n} for n in names], "zoneID": NOTES_ZONE},
+                            params=dict(CLIENT_PARAMS, clientId=self.client_id, dsid=self.dsid))
+        return res.get("records") or []
 
     def download(self, asset, filename="file"):
         url = asset["downloadURL"].replace("${f}", urllib.parse.quote(filename or "file"))
@@ -906,6 +927,168 @@ class ICloudImporter:
 
         self._on_main(apply)
         return stats
+
+    # ---------------------------------------------------- test push (experimental)
+
+    def push_note(self, note_id, payload):
+        """Create a new iCloud note from a local one, in the "From Debian" folder. Never edits existing notes."""
+        if self.busy:
+            self._emit_push(note_id, ok=False, message="iCloud sync is running. Try again in a few seconds.")
+            return
+        self.busy = True
+
+        def run():
+            try:
+                self._emit_push(note_id, **self._push(note_id, payload))
+            except NotSignedIn:
+                self.client = None
+                self._emit_push(note_id, ok=False, signin=True, message="Sign in to iCloud first.")
+            except Exception as exc:
+                traceback.print_exc()
+                self._log({"push_error": repr(exc), "trace": traceback.format_exc()})
+                self._emit_push(note_id, ok=False, message=str(exc))
+            finally:
+                self.busy = False
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _emit_push(self, note_id, **result):
+        payload = json.dumps(dict(result, noteId=note_id))
+        GLib.idle_add(lambda: (self.win.eval_js(f"window.N && N.sync && N.sync.onPush({payload})"), False)[1])
+
+    def _push(self, note_id, payload):
+        self._ensure_client()
+        state = self._on_main(lambda: self.store.import_state(SOURCE))
+        if any(st["note_id"] == note_id and st["present"] for st in state.values()):
+            return {"ok": False, "message": "This note already exists in iCloud."}
+        paragraphs = payload.get("paragraphs") or []
+        if not any(r.get("text", "").strip() for p in paragraphs for r in p.get("runs", [])):
+            return {"ok": False, "message": "This note is empty."}
+
+        folder = self._push_folder()
+        now = time.time()
+        record_name = str(uuid.uuid4()).upper()
+        blob, text = an.build_note_store(paragraphs, uuid.uuid4().bytes, now, lambda: uuid.uuid4().bytes)
+        summary = an.summarize(text)
+        enc = lambda b: {"value": base64.b64encode(b if isinstance(b, bytes) else b.encode()).decode(), "type": "ENCRYPTED_BYTES"}
+        ms = int(now * 1000)
+        ref = {"recordName": folder, "action": "VALIDATE"}
+        record = {
+            "recordName": record_name, "recordType": "Note",
+            "fields": {
+                "TitleEncrypted": enc(summary["title"]),
+                "SnippetEncrypted": enc(summary["snippet"]),
+                "TextDataEncrypted": enc(blob),
+                "Folder": {"value": ref, "type": "REFERENCE"},
+                "Folders": {"value": [ref], "type": "REFERENCE_LIST"},
+                "CreationDate": {"value": ms, "type": "TIMESTAMP"},
+                "ModificationDate": {"value": ms, "type": "TIMESTAMP"},
+                "FoldersModificationDate": {"value": ms, "type": "TIMESTAMP"},
+                "Deleted": {"value": 0, "type": "INT64"},
+                "AttachmentViewType": {"value": 0, "type": "INT64"},
+                "PaperStyleType": {"value": 0, "type": "INT64"},
+                "MinimumSupportedNotesVersion": {"value": 0, "type": "INT64"},
+            },
+        }
+        self._log({"push": record_name, "paragraphs": len(paragraphs), "chars": len(text)})
+        self.client.modify([{"operationType": "create", "record": record}])
+
+        # Read it back and check iCloud stored exactly what we sent.
+        back = self.client.lookup([record_name])
+        verified = False
+        if back and not back[0].get("serverErrorCode"):
+            data = rec_bytes(back[0], "TextDataEncrypted")
+            verified = bool(data) and an.plain_text(an.parse_note_store(data)) == text
+            self.records = self.records if self.records is not None else self._load_cache()[0] or {}
+            self.records[record_name] = back[0]
+        remote_modified = rec_time(back[0], "ModificationDate", "modified") if back else now
+
+        def remember():
+            row = self.store.note_row(note_id)
+            self.store.set_mapping(PUSH_SOURCE, record_name, note_id)
+            # Track it like an imported note so pull sync brings iPhone edits back; the local copy counts
+            # as unedited from this moment.
+            self.store.db.execute(
+                "INSERT INTO imports (source, external_id, note_id, modified) VALUES (?, ?, ?, ?)"
+                " ON CONFLICT(source, external_id) DO UPDATE SET note_id = excluded.note_id, modified = excluded.modified",
+                (SOURCE, record_name, note_id, max(remote_modified, row["updated_at"])))
+            self.store.commit()
+
+        self._on_main(remember)
+        self._save_cache()
+        self._log({"push_done": record_name, "verified": verified})
+        return {"ok": True, "verified": verified, "folder": PUSH_FOLDER_NAME}
+
+    def _push_folder(self):
+        """The iCloud folder pushed notes go into; created on first use."""
+        known = self._on_main(lambda: self.store.mapping(PUSH_SOURCE + "-folder")).get("folder")
+        if known:
+            return known
+        if self.records is None:
+            self.records = self._load_cache()[0] or {}
+        for rec in self.records.values():
+            if rec.get("recordType") == "Folder" and not rec_int(rec, "Deleted") and \
+                    rec_text(rec, "TitleEncrypted") == PUSH_FOLDER_NAME:
+                name = rec["recordName"]
+                break
+        else:
+            name = str(uuid.uuid4()).upper()
+            ms = int(time.time() * 1000)
+            self.client.modify([{"operationType": "create", "record": {
+                "recordName": name, "recordType": "Folder",
+                "fields": {
+                    "TitleEncrypted": {"value": base64.b64encode(PUSH_FOLDER_NAME.encode()).decode(), "type": "ENCRYPTED_BYTES"},
+                    "TitleModificationDate": {"value": ms, "type": "TIMESTAMP"},
+                    "MinimumSupportedNotesVersion": {"value": 0, "type": "INT64"},
+                },
+            }}])
+            self._on_main(lambda: (self.store.set_mapping(PUSH_SOURCE, "folder:" + name, 0), self.store.commit()))
+        self._on_main(lambda: (self.store.set_mapping(PUSH_SOURCE + "-folder", "folder", name), self.store.commit()))
+        return name
+
+    def remove_pushed(self):
+        """Delete every note (and the folder) this app created in iCloud."""
+        if self.busy:
+            self._emit_push(None, ok=False, message="iCloud sync is running. Try again in a few seconds.")
+            return
+        self.busy = True
+
+        def run():
+            try:
+                self._ensure_client()
+                pushed = self._on_main(lambda: self.store.mapping(PUSH_SOURCE))
+                notes = [n for n in pushed if not n.startswith("folder:")]
+                folders = [n[len("folder:"):] for n in pushed if n.startswith("folder:")]
+                ops = [{"operationType": "forceDelete", "record": {"recordName": n}} for n in notes + folders]
+                if ops:
+                    self.client.modify(ops)
+
+                def forget():
+                    for n in notes:
+                        self.store.forget_import(PUSH_SOURCE, n)
+                        self.store.forget_import(SOURCE, n)  # the local copies stay as ordinary local notes
+                    for f in folders:
+                        self.store.forget_import(PUSH_SOURCE, "folder:" + f)
+                        self.store.forget_import(FOLDER_SOURCE, f)
+                    self.store.forget_import(PUSH_SOURCE + "-folder", "folder")
+                    self.store.commit()
+
+                self._on_main(forget)
+                for n in notes + folders:
+                    (self.records or {}).pop(n, None)
+                self._save_cache()
+                self._emit_push(None, ok=True, removed=len(notes))
+            except NotSignedIn:
+                self.client = None
+                self._emit_push(None, ok=False, signin=True, message="Sign in to iCloud first.")
+            except Exception as exc:
+                traceback.print_exc()
+                self._log({"remove_error": repr(exc), "trace": traceback.format_exc()})
+                self._emit_push(None, ok=False, message=str(exc))
+            finally:
+                self.busy = False
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _item(self, rec, stats, keep_folders, pinned):
         try:

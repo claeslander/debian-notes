@@ -484,6 +484,74 @@
     }
   }
 
+  // ------------------------------------------------- html -> Apple paragraphs
+
+  // The structure the Python encoder turns into Apple's note format (test push to iCloud).
+  // Tables become tab-separated lines; images and files are left out for now.
+  C.toAppleParagraphs = function (root) {
+    const paras = [];
+    const STYLE = { H1: 0, H2: 1, H3: 2 };
+
+    function runsOf(node, fmt, out) {
+      for (const n of Array.from(node.childNodes)) {
+        if (n.nodeType === 3) {
+          const t = n.nodeValue.replace(/ /g, ' ').replace(/\n/g, ' ');
+          if (t) out.push(Object.assign({ text: t }, fmt));
+          continue;
+        }
+        if (n.nodeType !== 1 || n.classList.contains('nt-missing') || n.classList.contains('nt-file')) continue;
+        const tag = n.tagName;
+        if (tag === 'BR') { out.push({ br: true }); continue; }
+        if (tag === 'IMG' || tag === 'UL' || tag === 'OL' || tag === 'TABLE') continue;
+        const f = Object.assign({}, fmt);
+        if (tag === 'B' || tag === 'STRONG' || /^(bold|[6-9]00)$/.test(n.style.fontWeight)) f.bold = true;
+        if (tag === 'I' || tag === 'EM') f.italic = true;
+        if (tag === 'U') f.underline = true;
+        if (tag === 'S' || tag === 'STRIKE' || tag === 'DEL') f.strike = true;
+        if (tag === 'A' && n.getAttribute('href')) f.link = n.getAttribute('href');
+        runsOf(n, f, out);
+      }
+      return out;
+    }
+
+    // Split runs at <br> into separate paragraphs with the same style.
+    function push(style, runs, extra = {}) {
+      // A trailing <br> only keeps an empty line open in the editor; it isn't an extra line.
+      if (runs.length && runs[runs.length - 1].br) runs = runs.slice(0, -1);
+      let cur = [];
+      for (const r of runs) {
+        if (r.br) { paras.push(Object.assign({ style, runs: cur }, extra)); cur = []; } else cur.push(r);
+      }
+      paras.push(Object.assign({ style, runs: cur }, extra));
+    }
+
+    function list(el, depth) {
+      const kind = el.tagName === 'OL' ? 102 : el.classList.contains('checklist') ? 103 : el.classList.contains('dashed') ? 101 : 100;
+      for (const child of Array.from(el.children)) {
+        if (child.tagName === 'LI') {
+          push(kind, runsOf(child, {}, []), { indent: depth, checked: child.getAttribute('data-checked') === 'true' });
+          child.querySelectorAll(':scope > ul, :scope > ol').forEach((sub) => list(sub, depth + 1));
+        } else if (child.tagName === 'UL' || child.tagName === 'OL') list(child, depth + 1);
+      }
+    }
+
+    for (const block of Array.from(root.childNodes)) {
+      if (block.nodeType === 3) { if (block.nodeValue.trim()) push(null, [{ text: block.nodeValue }]); continue; }
+      if (block.nodeType !== 1) continue;
+      const tag = block.tagName;
+      if (STYLE[tag] !== undefined) push(STYLE[tag], runsOf(block, {}, []));
+      else if (tag === 'PRE') block.textContent.split('\n').forEach((line) => paras.push({ style: 4, runs: [{ text: line }] }));
+      else if (tag === 'UL' || tag === 'OL') list(block, 0);
+      else if (tag === 'TABLE') {
+        block.querySelectorAll('tr').forEach((tr) => paras.push({
+          style: null, runs: [{ text: Array.from(tr.children).map((td) => td.innerText.replace(/\s+/g, ' ').trim()).join('\t') }],
+        }));
+      } else push(null, runsOf(block, {}, []), block.dataset.indent ? { indent: +block.dataset.indent } : {});
+    }
+    while (paras.length > 1 && !paras[paras.length - 1].runs.some((r) => r.text && r.text.trim())) paras.pop();
+    return paras;
+  };
+
   // ------------------------------------------------------------ html export
 
   C.toHtmlDocument = function (title, bodyHtml) {

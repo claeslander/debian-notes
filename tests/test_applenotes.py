@@ -173,3 +173,31 @@ class TableDecodingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EncodingTest(unittest.TestCase):
+    def test_roundtrip_and_crdt_layout(self):
+        paras = [
+            {"style": 0, "runs": [{"text": "Boodschappen"}]},
+            {"style": None, "runs": [{"text": "Voor "}, {"text": "zaterdag", "bold": True}, {"text": " 😀"}]},
+            {"style": 103, "checked": True, "runs": [{"text": "Melk"}]},
+            {"style": 103, "checked": False, "runs": [{"text": "Brood"}]},
+            {"style": 102, "runs": [{"text": "site", "link": "https://example.com"}]},
+            {"style": None, "runs": []},
+        ]
+        blob, text = an.build_note_store(paras, b"U" * 16, 1790000000, lambda: b"C" * 16)
+        self.assertEqual(text, "Boodschappen\nVoor zaterdag 😀\nMelk\nBrood\nsite\n")
+        note = an.parse_note_store(blob)
+        self.assertEqual(an.plain_text(note), text)
+        html = an.note_to_html(note)
+        self.assertTrue(html.startswith("<h1>Boodschappen</h1><div>Voor <b>zaterdag</b> 😀</div>"
+                                        '<ul class="checklist"><li data-checked="true">Melk</li><li>Brood</li></ul>'))
+        self.assertIn('<a href="https://example.com">site</a>', html)
+        # Topotext layout as Apple writes it for a fresh note.
+        n16 = len(text.encode("utf-16-le")) // 2
+        subs = note.msgs(3)
+        self.assertEqual([(s.msg(1).int(1), s.msg(1).int(2), s.int(2), s.raw_list(5)) for s in subs],
+                         [(0, 0, 0, [1]), (1, 0, n16, [2]), (0, an.SENTINEL_END, 0, [])])
+        clock = note.msg(4).msgs(1)[0]
+        self.assertEqual((clock.bytes(1), [c.int(1) for c in clock.msgs(2)]), (b"U" * 16, [n16, 1]))
+        self.assertEqual(sum(r.int(1) for r in note.msgs(5)), n16)

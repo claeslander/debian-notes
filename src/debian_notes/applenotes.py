@@ -418,3 +418,90 @@ def table_to_html(data, resolve=None):
         raise ValueError("empty table")
     body = "".join("<tr>" + "".join(f"<td>{c or '<br>'}</td>" for c in r) + "</tr>" for r in grid)
     return f'<table class="nt-table"><tbody>{body}</tbody></table>'
+
+
+# --------------------------------------------------------------------- encoding
+
+# Writing a brand-new note. The layout mirrors what Apple's own clients store for a freshly typed
+# note (observed in real records): a NoteStoreProto(1: 0, 2: Document(1: 0, 2: 0, 3: Note)), where
+# the Note's topotext CRDT is a start sentinel, one substring holding all text from replica 1, and
+# an end sentinel; the version vector has one replica clock pair (next char id, next timestamp).
+
+SENTINEL_END = 0xFFFFFFFF
+
+
+def _ev(n):
+    out = bytearray()
+    while True:
+        b = n & 0x7F
+        n >>= 7
+        out.append(b | (0x80 if n else 0))
+        if not n:
+            return bytes(out)
+
+
+def _fi(num, value):
+    return _ev(num << 3) + _ev(int(value))
+
+
+def _fb(num, data):
+    if isinstance(data, str):
+        data = data.encode("utf-8")
+    return _ev(num << 3 | 2) + _ev(len(data)) + data
+
+
+def _char_id(replica, clock):
+    return _fi(1, replica) + _fi(2, clock)
+
+
+def build_note_store(paragraphs, replica_uuid, timestamp, uuid_factory):
+    """paragraphs: [{"style": None|0|1|2|4|100|101|102|103, "indent": int, "checked": bool,
+    "runs": [{"text", "bold", "italic", "underline", "strike", "link"}]}]
+    Returns (gzip bytes, plain text)."""
+    text_parts, runs = [], []
+    stamp = int(timestamp)
+    for i, para in enumerate(paragraphs):
+        style = para.get("style")
+        ps = b""
+        if style is not None:
+            ps += _fi(1, style)
+        ps += _fi(3, 1)  # writing direction: left to right, as Apple writes it
+        if para.get("indent"):
+            ps += _fi(4, para["indent"])
+        if style == STYLE_CHECKLIST:
+            ps += _fb(5, _fb(1, uuid_factory()) + _fi(2, 1 if para.get("checked") else 0))
+        pieces = [r for r in para.get("runs") or [] if r.get("text")]
+        if i < len(paragraphs) - 1:
+            if pieces:
+                pieces[-1] = dict(pieces[-1], text=pieces[-1]["text"] + "\n")
+            else:
+                pieces = [{"text": "\n"}]
+        for r in pieces:
+            t = r["text"].replace(OBJECT_REPLACEMENT, "")
+            if not t:
+                continue
+            body = _fi(1, len(t.encode("utf-16-le")) // 2) + _fb(2, ps)
+            weight = (1 if r.get("bold") else 0) | (2 if r.get("italic") else 0)
+            if weight:
+                body += _fi(5, weight)
+            if r.get("underline"):
+                body += _fi(6, 1)
+            if r.get("strike"):
+                body += _fi(7, 1)
+            if r.get("link"):
+                body += _fb(9, r["link"])
+            body += _fi(13, stamp)
+            runs.append(body)
+            text_parts.append(t)
+    text = "".join(text_parts)
+    n = len(text.encode("utf-16-le")) // 2
+    substrings = [
+        _fb(1, _char_id(0, 0)) + _fi(2, 0) + _fb(3, _char_id(0, 0)) + _fi(5, 1),
+        _fb(1, _char_id(1, 0)) + _fi(2, n) + _fb(3, _char_id(1, 0)) + _fi(5, 2),
+        _fb(1, _char_id(0, SENTINEL_END)) + _fi(2, 0) + _fb(3, _char_id(0, SENTINEL_END)),
+    ]
+    clock = _fb(1, replica_uuid) + _fb(2, _fi(1, n)) + _fb(2, _fi(1, 1))
+    note = _fb(2, text) + b"".join(_fb(3, s) for s in substrings) + _fb(4, _fb(1, clock)) + \
+        b"".join(_fb(5, r) for r in runs)
+    document = _fi(1, 0) + _fi(2, 0) + _fb(3, note)
+    return gzip.compress(_fi(1, 0) + _fb(2, document)), text

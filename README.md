@@ -51,6 +51,10 @@ Tests: `python3 -m unittest discover -s tests`
 - **iCloud pull sync** (optional): keeps imported folders up to date every few minutes. Download only;
   if a note changes both here and in iCloud, both versions are kept. Only Apple's session token is stored,
   never your password (in `~/.local/share/debian-notes/icloud-web/`, private to your user).
+- **Experimental test push** (off by default, Settings → iCloud): “Send to iCloud (Test)” creates a *new*
+  iCloud note in a “From Debian” folder from the open note (text and formatting; tables as text, no images).
+  Existing iCloud notes are never edited. “Remove Test Notes from iCloud” deletes everything it created.
+  Try it with a test Apple ID first.
 - Light and dark appearance following the system, adjustable text size, keyboard shortcuts for everything
 
 Data lives in `~/.local/share/debian-notes/` (`notes.db` plus an `attachments/` folder).
