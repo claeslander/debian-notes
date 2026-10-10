@@ -479,9 +479,8 @@ body.list-focused:not(.window-inactive) .note-row.selected .note-folder { color:
 #overlay-root > * { pointer-events: auto; }
 .menu {
   position: fixed; min-width: 210px; padding: 5px; font-size: 13px;
-  background: var(--menu-bg); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px);
+  background: var(--popover-bg);
   border: 0.5px solid var(--menu-border); border-radius: 8px; box-shadow: var(--shadow-pop);
-  animation: fade-in 0.08s ease-out;
 }
 .menu-item { height: 24px; display: flex; align-items: center; padding: 0 10px 0 4px; border-radius: 5px; white-space: nowrap; }
 .menu-item.active { background: var(--menu-hl); color: #fff; }
@@ -509,9 +508,8 @@ body.list-focused:not(.window-inactive) .note-row.selected .note-folder { color:
 .popover {
   position: fixed; background: var(--popover-bg); border-radius: 13px;
   border: 0.5px solid var(--menu-border); box-shadow: var(--shadow-pop);
-  animation: pop-in 0.14s cubic-bezier(0.2, 0.9, 0.3, 1.2); transform-origin: top center;
+
 }
-.popover.closing { animation: fade-out 0.12s forwards; }
 .popover-arrow {
   position: absolute; top: -8px; width: 18px; height: 9px; overflow: hidden;
 }
@@ -554,17 +552,15 @@ body.list-focused:not(.window-inactive) .note-row.selected .note-folder { color:
 
 .sheet-backdrop {
   position: fixed; inset: 0; display: flex; justify-content: center; align-items: flex-start;
-  padding-top: calc(var(--toolbar-h) + 6px); background: rgba(0, 0, 0, 0); transition: background 0.18s;
+  padding-top: calc(var(--toolbar-h) + 6px); background: rgba(0, 0, 0, 0.14);
 }
-.sheet-backdrop.open { background: rgba(0, 0, 0, 0.14); }
 .sheet {
   width: 300px; padding: 20px 18px 16px; text-align: center;
   background: var(--sheet-bg); border-radius: 12px; border: 0.5px solid var(--menu-border);
   box-shadow: 0 24px 70px rgba(0, 0, 0, 0.32), 0 2px 10px rgba(0, 0, 0, 0.12);
-  transform: translateY(-14px) scale(0.98); opacity: 0; transition: transform 0.18s, opacity 0.18s;
+
   user-select: none;
 }
-.sheet-backdrop.open .sheet { transform: none; opacity: 1; }
 .sheet.wide { width: 520px; max-width: calc(100vw - 40px); text-align: left; }
 .sheet-icon { display: flex; justify-content: center; color: var(--secondary); }
 .sheet-icon svg { width: 60px; height: 60px; }
@@ -627,7 +623,7 @@ body.list-focused:not(.window-inactive) .note-row.selected .note-folder { color:
 .toast {
   position: fixed; left: 50%; bottom: 28px; transform: translate(-50%, 10px); opacity: 0;
   padding: 8px 16px; border-radius: 9px; font-size: 13px; color: #fff; background: rgba(40, 40, 42, 0.92);
-  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25); transition: opacity 0.2s, transform 0.2s; pointer-events: none !important;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.25); pointer-events: none !important;
 }
 .toast.show { opacity: 1; transform: translate(-50%, 0); }
 
@@ -635,20 +631,17 @@ body.list-focused:not(.window-inactive) .note-row.selected .note-folder { color:
 
 .importer-backdrop {
   position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; padding: 24px;
-  background: rgba(0, 0, 0, 0); -webkit-backdrop-filter: blur(0); backdrop-filter: blur(0);
-  transition: background 0.2s, backdrop-filter 0.2s;
+  background: rgba(0, 0, 0, 0.28);
 }
 body.rounded .importer-backdrop { border-radius: 10px; }
-.importer-backdrop.open { background: rgba(0, 0, 0, 0.28); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
 .importer {
   position: relative; width: 620px; max-width: 100%; height: 640px; max-height: 100%;
   display: flex; flex-direction: column; overflow: hidden;
   background: var(--sheet-bg); border-radius: 16px; border: 0.5px solid var(--menu-border);
   box-shadow: 0 30px 90px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.12);
-  transform: translateY(12px) scale(0.98); opacity: 0; transition: transform 0.22s cubic-bezier(.2,.9,.3,1.1), opacity 0.2s;
+
   user-select: none;
 }
-.importer-backdrop.open .importer { transform: none; opacity: 1; }
 .imp-close { position: absolute; top: 14px; right: 14px; color: var(--secondary2); --x-glyph: var(--sheet-bg); z-index: 2; }
 .imp-close .icon { width: 20px; height: 20px; }
 .imp-close:hover { color: var(--secondary); }
@@ -763,7 +756,7 @@ body.rounded .importer-backdrop { border-radius: 10px; }
 
 .imp-check {
   width: 76px; height: 76px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
-  background: #30c759; color: #fff; animation: imp-pop 0.45s cubic-bezier(.2,1.4,.4,1);
+  background: #30c759; color: #fff;
   box-shadow: 0 10px 30px rgba(48, 199, 89, 0.35);
 }
 .imp-check .icon { width: 40px; height: 40px; stroke-width: 2.4; }
