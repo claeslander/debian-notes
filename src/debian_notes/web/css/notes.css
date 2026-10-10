@@ -9,8 +9,8 @@
   --list-w: 300px;
 
   --sidebar-bg: #eceae9;
-  --sidebar-glass: rgba(236, 234, 233, 0.88);
-  --sidebar-glass-inactive: rgba(236, 234, 233, 0.96);
+  --sidebar-rgb: 236, 234, 233;
+  --glass: 0.04; /* sidebar transparency, set from Settings */
   --list-bg: #ffffff;
   --editor-bg: #ffffff;
   --text: #1d1d1f;
@@ -60,8 +60,7 @@
 
 :root[data-theme="dark"] {
   --sidebar-bg: #2a292c;
-  --sidebar-glass: rgba(40, 38, 44, 0.86);
-  --sidebar-glass-inactive: rgba(40, 38, 44, 0.96);
+  --sidebar-rgb: 40, 38, 44;
   --list-bg: #1e1e1e;
   --editor-bg: #1e1e1e;
   --text: #e9e9eb;
@@ -127,8 +126,8 @@ body.rounded #app { border-radius: 10px; overflow: hidden; background: var(--edi
 /* Translucent sidebar: the window is transparent, so the desktop shows through the sidebar
    (GNOME doesn't let apps blur what's behind them, so it's tinted rather than frosted). */
 body.rounded.glass #app { background: transparent; }
-body.rounded.glass #sidebar { background: var(--sidebar-glass); transition: background-color 0.2s; }
-body.rounded.glass.window-inactive #sidebar { background: var(--sidebar-glass-inactive); }
+body.rounded.glass #sidebar { background: rgba(var(--sidebar-rgb), calc(1 - var(--glass))); transition: background-color 0.2s; }
+body.rounded.glass.window-inactive #sidebar { background: rgba(var(--sidebar-rgb), calc(1 - var(--glass) * 0.5)); }
 body.rounded.glass .sb-row.active { background: rgba(0, 0, 0, 0.1); }
 :root[data-theme="dark"] body.rounded.glass .sb-row.active { background: rgba(255, 255, 255, 0.12); }
 body.rounded .sheet-backdrop { border-radius: 10px; }

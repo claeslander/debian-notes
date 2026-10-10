@@ -40,12 +40,20 @@
     document.documentElement.style.setProperty('--editor-size', (S.settings.textSize || 15) + 'px');
   }
 
+  // Sidebar transparency: 0 (off) .. 0.2. Older setting `translucentSidebar: false` means off.
+  function sidebarGlass() {
+    if (S.settings.sidebarGlass !== undefined) return +S.settings.sidebarGlass || 0;
+    return S.settings.translucentSidebar === false ? 0 : 0.04;
+  }
+
   function applyLayout() {
     const app = document.getElementById('app');
     app.style.setProperty('--sidebar-w', (S.settings.sidebarWidth || 220) + 'px');
     app.style.setProperty('--list-w', (S.settings.listWidth || 300) + 'px');
     body.classList.toggle('sidebar-hidden', S.settings.sidebarVisible === false);
-    body.classList.toggle('glass', S.settings.translucentSidebar !== false);
+    const glass = sidebarGlass();
+    body.classList.toggle('glass', glass > 0);
+    document.documentElement.style.setProperty('--glass', String(glass));
     body.classList.toggle('view-gallery', S.view === 'gallery');
     body.classList.toggle('gallery-open', S.view === 'gallery' && S.galleryOpen);
     N.$('[data-action="viewList"]').classList.toggle('active', S.view === 'list');
@@ -921,13 +929,14 @@
         <div class="pref-row"><span>Appearance:</span>${sel('appearance', [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']], S.settings.appearance || 'system')}</div>
         <div class="pref-row"><span>Default text size:</span>${sel('textSize', [12, 13, 14, 15, 16, 17, 18, 20, 22].map((s) => [s, s + ' pt']), S.settings.textSize || 15)}</div>
         <div class="pref-row"><span>New notes start with:</span>${sel('newNoteStyle', [['title', 'Title'], ['heading', 'Heading'], ['subheading', 'Subheading'], ['body', 'Body']], S.settings.newNoteStyle || 'title')}</div>
+        <div class="pref-row"><span>Sidebar transparency:</span>${sel('sidebarGlass', [[0, 'Off'], [0.04, 'Subtle'], [0.1, 'Light'], [0.2, 'Medium']], sidebarGlass())}</div>
         <div class="pref-row"><span>Sort notes by:</span>${sel('sortBy', [['updated', 'Date Edited'], ['created', 'Date Created'], ['title', 'Title']], S.settings.sortBy || 'updated')}</div>
         <div class="pref-row"><span></span><div class="pref-checks">
           ${check('groupByDate', 'Group notes by date', S.settings.groupByDate !== false)}
           ${check('sortChecked', 'Sort checked items to the bottom', !!S.settings.sortChecked)}
           ${check('showCounts', 'Show note counts', S.settings.showCounts !== false)}
           ${check('slashCommands', 'Slash commands — type / to format a line', !!S.settings.slashCommands)}
-          ${check('translucentSidebar', 'Translucent sidebar', S.settings.translucentSidebar !== false)}
+
         </div></div>
         <div class="pref-row pref-top"><span>iCloud:</span><div class="pref-checks">
           ${check('icloudSync', 'Keep notes in sync with iCloud (download only)', !!(S.settings['icloud.sync'] || {}).enabled)}
@@ -967,13 +976,13 @@
             });
             return;
           }
-          const v = t.type === 'checkbox' ? t.checked : t.name === 'textSize' ? +t.value : t.value;
+          const v = t.type === 'checkbox' ? t.checked : (t.name === 'textSize' || t.name === 'sidebarGlass') ? +t.value : t.value;
           A.setSetting(t.name, v);
           if (t.name === 'appearance') applyTheme();
           if (t.name === 'textSize') applyTextSize();
           if (['sortBy', 'groupByDate'].includes(t.name)) N.notelist.render();
           if (t.name === 'showCounts') N.sidebar.render();
-          if (t.name === 'translucentSidebar') applyLayout();
+          if (t.name === 'sidebarGlass') applyLayout();
         });
         sheet.addEventListener('click', (e) => {
           if (e.target.closest('[data-pref="syncNow"]')) { N.send('icloudSyncNow'); return; }
