@@ -14,6 +14,8 @@ graph TD
     STORE[store.py<br/>SQLite: folders, notes, tags, settings]
     CRYPTO[crypto.py<br/>PBKDF2 + HMAC-CTR + HMAC tag]
     WELCOME[welcome.py<br/>first-run note]
+    ICLOUD[icloud.py<br/>sign-in window · CloudKit client · import]
+    APNOTES[applenotes.py<br/>Apple note & table protobuf decoder]
   end
   subgraph Web ["Web UI (src/debian_notes/web)"]
     BRIDGE[bridge.js<br/>N.call / N.send]
@@ -32,6 +34,10 @@ graph TD
   API --> STORE --> DISK
   API --> CRYPTO
   APP --> WELCOME
+  API --> ICLOUD --> APNOTES
+  ICLOUD --> STORE
+  IMPORTER[importer.js<br/>guided import screen] --> BRIDGE
+  APPJS --> IMPORTER
   BRIDGE <-->|"postMessage(JSON) / evaluate_javascript"| API
   APPJS --> BRIDGE
   APPJS --> SIDEBAR & LIST & EDITOR & UI & CONVERT
@@ -50,6 +56,7 @@ graph TD
 | Own undo history | Manual DOM edits would corrupt WebKit's native undo stack; snapshots with path-based selection restore exactly. |
 | Note HTML stored as-is, plus `plain`, `title`, `snippet` | The list renders without loading bodies; search runs in SQL. |
 | Attachments as files, referenced by `file://` URI | Keeps the database small; HTML export inlines them as data URIs. |
+| iCloud import through a sign-in window | The user signs in on Apple's page in a separate WebKit profile (`icloud-web/`); Python reuses its cookies to call the CloudKit web service iCloud.com uses, then decodes Apple's protobuf note format itself. No password is handled by the app. |
 | Locking in Python with the stdlib | No crypto dependency and no reliance on WebCrypto in a `file://` page. Keys live only in memory while unlocked. |
 
 ## Data model
@@ -73,6 +80,7 @@ graph TD
 | Tags, search with highlights | ✅ |
 | Locked notes with password and hint | ✅ |
 | Export / print / import | ✅ |
+| Import from iCloud (folders, formatting, tables, attachments) | ✅ (locked notes skipped) |
 | Smart folders, Quick Notes, note-to-note links | ⏳ planned |
 | Collapsible sections, rich link previews, audio recording | ⏳ planned |
 | iCloud sync, collaboration | ❌ out of scope (local-only by design) |

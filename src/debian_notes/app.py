@@ -47,6 +47,7 @@ class Api:
         self.win = window
         self.store = store
         self.keys = None  # session keys while locked notes are open
+        self._icloud_importer = None
 
     # ------------------------------------------------------------ bootstrap
 
@@ -268,6 +269,32 @@ class Api:
             return f'{m.group(1)}"data:{mime};base64,{data}"'
 
         return re.sub(r'(<img[^>]*?\ssrc=)"([^"]+)"', repl, html)
+
+    # ---------------------------------------------------------------- iCloud
+
+    def _icloud(self):
+        if self._icloud_importer is None:
+            from .icloud import ICloudImporter
+            self._icloud_importer = ICloudImporter(self.win, self.store, self.store.data_dir)
+        return self._icloud_importer
+
+    def icloudStart(self):
+        self._icloud().start()
+
+    def icloudSignIn(self):
+        self._icloud().open_signin()
+
+    def icloudScan(self):
+        self._icloud().scan()
+
+    def icloudImport(self, options):
+        self._icloud().run_import(options)
+
+    def icloudCancel(self):
+        self._icloud().cancel()
+
+    def icloudSignOut(self):
+        self._icloud().sign_out()
 
     # --------------------------------------------------------------- window
 

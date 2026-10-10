@@ -39,6 +39,13 @@ CREATE TABLE IF NOT EXISTS settings (
     key    TEXT PRIMARY KEY,
     value  TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS imports (
+    source       TEXT NOT NULL,
+    external_id  TEXT NOT NULL,
+    note_id      INTEGER NOT NULL,
+    modified     REAL NOT NULL,
+    PRIMARY KEY (source, external_id)
+);
 CREATE INDEX IF NOT EXISTS idx_notes_folder ON notes(folder_id);
 CREATE INDEX IF NOT EXISTS idx_tags_tag ON note_tags(tag);
 """
@@ -318,6 +325,50 @@ class Store:
             "deletedAt": r["deleted_at"],
             "tags": tags,
         }
+
+    # ---------------------------------------------------------------- imports
+
+    def find_or_create_folder(self, name, parent_id=None):
+        name = (name or "").strip() or "Notes"
+        row = self.db.execute(
+            "SELECT id FROM folders WHERE parent_id IS ? AND lower(name) = lower(?)", (parent_id, name)
+        ).fetchone()
+        if row:
+            return row["id"]
+        return self.create_folder(name, parent_id)["id"]
+
+    def imported(self, source):
+        """external_id -> (note_id, modified) for notes that still exist."""
+        rows = self.db.execute(
+            "SELECT i.external_id, i.note_id, i.modified FROM imports i JOIN notes n ON n.id = i.note_id"
+            " WHERE i.source = ?", (source,)
+        )
+        return {r["external_id"]: (r["note_id"], r["modified"]) for r in rows}
+
+    def save_imported_note(self, source, external_id, folder_id, data, created, modified, note_id=None):
+        """Create (or overwrite) a note from an external source, keeping its original dates."""
+        fields = (data.get("title", ""), data.get("snippet", ""), data.get("body", ""), data.get("plain", ""),
+                  data.get("thumbnail"))
+        if note_id is None:
+            cur = self.db.execute(
+                "INSERT INTO notes (folder_id, title, snippet, body, plain, thumbnail, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (folder_id, *fields, created, modified),
+            )
+            note_id = cur.lastrowid
+        else:
+            self.db.execute(
+                "UPDATE notes SET title = ?, snippet = ?, body = ?, plain = ?, thumbnail = ?, updated_at = ?"
+                " WHERE id = ?",
+                (*fields, modified, note_id),
+            )
+        self._set_tags(note_id, data.get("tags", ()))
+        self.db.execute(
+            "INSERT INTO imports (source, external_id, note_id, modified) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(source, external_id) DO UPDATE SET note_id = excluded.note_id, modified = excluded.modified",
+            (source, external_id, note_id, modified),
+        )
+        return note_id
 
     # --------------------------------------------------------------- settings
 

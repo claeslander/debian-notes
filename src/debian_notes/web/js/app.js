@@ -58,6 +58,15 @@
 
   // ------------------------------------------------------------ rendering
 
+  // Re-read folders and notes from disk (after an import).
+  A.reloadData = async function () {
+    const data = await N.call('bootstrap');
+    S.folders = data.folders;
+    S.notes = new Map(data.notes.map((n) => [n.id, n]));
+    A.refresh();
+    if (S.currentNoteId != null && !S.notes.has(S.currentNoteId)) await A.selectNote(N.notelist.order[0] ?? null, { force: true });
+  };
+
   A.refresh = function () {
     N.sidebar.render();
     N.notelist.render();
@@ -601,7 +610,8 @@
     const setSort = (v) => { A.setSetting('sortBy', v); N.notelist.render(); };
     N.ui.menuFor(anchor, [
       { label: 'New Folder', shortcut: 'Ctrl+Shift+N', action: () => A.newFolder() },
-      { label: 'Import to Notes…', action: () => importNotes() },
+      { label: 'Import from iCloud…', action: () => N.importer.open() },
+      { label: 'Import Files…', action: () => importNotes() },
       '-',
       { label: 'View as List', checked: S.view === 'list', shortcut: 'Ctrl+1', action: () => setView('list') },
       { label: 'View as Gallery', checked: S.view === 'gallery', shortcut: 'Ctrl+2', action: () => setView('gallery') },
@@ -811,7 +821,7 @@
   // --------------------------------------------------- window drag regions
 
   function updateDragRegions() {
-    const overlayOpen = document.querySelector('#overlay-root .sheet-backdrop, #overlay-root .menu, #overlay-root .popover');
+    const overlayOpen = document.querySelector('#overlay-root .sheet-backdrop, #overlay-root .menu, #overlay-root .popover, #overlay-root .importer-backdrop');
     const rect = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; };
     const visible = (el) => el.offsetParent !== null && el.getBoundingClientRect().width > 0;
     const areas = overlayOpen ? [] : N.$$('.toolbar').filter(visible).map(rect);

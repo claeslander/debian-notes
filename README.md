@@ -46,6 +46,8 @@ Tests: `python3 -m unittest discover -s tests`
 - Search across all notes, with matches highlighted in the list and the note
 - Password-locked notes (encrypted at rest), pin notes, duplicate, move, drag notes onto folders
 - Export to PDF (print), HTML, Markdown and plain text; import `.txt`, `.md` and `.html`
+- **Import from iCloud**: sign in on Apple's own page inside the app and bring over all notes, folders,
+  checklists, tables and attachments (⋯ → Import from iCloud…). Locked notes are skipped.
 - Light and dark appearance following the system, adjustable text size, keyboard shortcuts for everything
 
 Data lives in `~/.local/share/debian-notes/` (`notes.db` plus an `attachments/` folder).
