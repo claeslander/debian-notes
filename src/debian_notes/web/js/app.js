@@ -757,7 +757,7 @@
           ${check('showCounts', 'Show note counts', S.settings.showCounts !== false)}
           ${check('slashCommands', 'Slash commands — type / to format a line', !!S.settings.slashCommands)}
         </div></div>
-        <div class="pref-row"><span>iCloud:</span><div class="pref-checks">
+        <div class="pref-row pref-top"><span>iCloud:</span><div class="pref-checks">
           ${check('icloudSync', 'Keep notes in sync with iCloud (download only)', !!(S.settings['icloud.sync'] || {}).enabled)}
           <div class="pref-inline">Check every ${sel('icloudInterval', [[5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, 'hour']], (S.settings['icloud.sync'] || {}).interval || 15)}</div>
           <div class="pref-inline"><button class="push-btn" data-pref="syncNow">Sync Now</button>
