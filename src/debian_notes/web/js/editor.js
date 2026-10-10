@@ -189,6 +189,7 @@
   };
 
   E.mount = function (meta, body, opts = {}) {
+    closeSlash();
     clearTimeout(saveTimer);
     note = meta;
     readOnly = !!opts.readOnly;
@@ -214,6 +215,7 @@
   };
 
   E.unmount = function () {
+    closeSlash();
     clearTimeout(saveTimer);
     note = null;
     readOnly = true;
@@ -804,8 +806,140 @@
     return !!trailing;
   }
 
+  // -------------------------------------------------------- slash commands
+
+  // Typing "/" at the start of a line or after a space opens a command menu (Settings → Slash commands).
+  const SLASH_COMMANDS = [
+    { id: 'title', label: 'Title', icon: 'textTitle', keys: 'titel h1', run: () => E.setStyle('title') },
+    { id: 'heading', label: 'Heading', icon: 'textHeading', keys: 'kop h2', run: () => E.setStyle('heading') },
+    { id: 'subheading', label: 'Subheading', icon: 'textSub', keys: 'subkop h3', run: () => E.setStyle('subheading') },
+    { id: 'body', label: 'Body', icon: 'textBody', keys: 'text tekst normal paragraph', run: () => E.setStyle('body') },
+    { id: 'mono', label: 'Monostyled', icon: 'textMono', keys: 'code monospace', run: () => E.setStyle('mono') },
+    { id: 'checklist', label: 'Checklist', icon: 'checklist', keys: 'todo task taken vinkje', run: () => E.toggleList('checklist') },
+    { id: 'bullet', label: 'Bulleted List', icon: 'bulleted', keys: 'lijst list ul', run: () => E.toggleList('bullet') },
+    { id: 'dashed', label: 'Dashed List', icon: 'dashed', keys: 'lijst list streepjes', run: () => E.toggleList('dashed') },
+    { id: 'numbered', label: 'Numbered List', icon: 'numbered', keys: 'lijst list ol genummerd', run: () => E.toggleList('numbered') },
+    { id: 'quote', label: 'Block Quote', icon: 'quote', keys: 'citaat blockquote', run: () => E.toggleQuote() },
+    { id: 'table', label: 'Table', icon: 'table', keys: 'tabel grid', run: () => E.insertTable() },
+    { id: 'image', label: 'Photo…', icon: 'photo', keys: 'image afbeelding foto picture', run: () => N.app.insertPhotos() },
+    { id: 'file', label: 'Attach File…', icon: 'paperclip', keys: 'bestand bijlage attachment', run: () => N.app.attachFile() },
+    { id: 'sketch', label: 'Sketch', icon: 'pen', keys: 'schets drawing tekening', run: () => N.sketch() },
+  ];
+
+  let slash = null; // { node, offset, query, items, index, el }
+
+  const slashEnabled = () => !!(N.state && N.state.settings.slashCommands);
+
+  function slashMatches(query) {
+    const q = query.toLowerCase();
+    if (!q) return SLASH_COMMANDS;
+    return SLASH_COMMANDS.filter((c) => c.label.toLowerCase().includes(q) || c.id.includes(q) ||
+      c.keys.split(' ').some((k) => k.startsWith(q)))
+      .sort((a, b) => (b.label.toLowerCase().startsWith(q) - a.label.toLowerCase().startsWith(q)));
+  }
+
+  function maybeOpenSlash(e) {
+    if (!slashEnabled() || slash || e.inputType !== 'insertText' || e.data !== '/') return;
+    const r = rangeInEditor();
+    if (!r || !r.collapsed || r.startContainer.nodeType !== 3) return;
+    const node = r.startContainer;
+    const offset = r.startOffset - 1;
+    const before = node.nodeValue.slice(0, offset);
+    // Only at the start of a line or after whitespace, so URLs and dates like 1/2 don't trigger it.
+    if (before && !/\s$/.test(before)) return;
+    if (closestIn(node, 'pre, a')) return;
+    slash = { node, offset, query: '', items: SLASH_COMMANDS, index: 0, el: null };
+    renderSlash();
+  }
+
+  function updateSlash() {
+    if (!slash) return;
+    const r = rangeInEditor();
+    const { node, offset } = slash;
+    if (!r || !r.collapsed || r.startContainer !== node || !node.isConnected || r.startOffset <= offset ||
+        node.nodeValue[offset] !== '/') { closeSlash(); return; }
+    const query = node.nodeValue.slice(offset + 1, r.startOffset);
+    if (/\s{2}|^\s/.test(query) || query.length > 24) { closeSlash(); return; }
+    slash.query = query;
+    slash.items = slashMatches(query.trim());
+    slash.index = Math.min(slash.index, Math.max(0, slash.items.length - 1));
+    if (!slash.items.length) { closeSlash(); return; }
+    renderSlash();
+  }
+
+  function renderSlash() {
+    if (!slash.el) {
+      slash.el = document.createElement('div');
+      slash.el.className = 'menu slash-menu';
+      slash.el.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const row = e.target.closest('[data-i]');
+        if (row) runSlash(+row.dataset.i);
+      });
+      slash.el.addEventListener('mousemove', (e) => {
+        const row = e.target.closest('[data-i]');
+        if (row && +row.dataset.i !== slash.index) { slash.index = +row.dataset.i; renderSlash(); }
+      });
+      document.getElementById('overlay-root').appendChild(slash.el);
+    }
+    slash.el.innerHTML = '<div class="menu-header">Basic blocks</div>' + slash.items.map((c, i) =>
+      `<div class="menu-item${i === slash.index ? ' active' : ''}" data-i="${i}">` +
+      `<span class="menu-icon">${N.icon(c.icon)}</span><span class="menu-label">${N.esc(c.label)}</span></div>`).join('');
+    const caret = document.createRange();
+    caret.setStart(slash.node, slash.offset);
+    caret.collapse(true);
+    const rect = caret.getBoundingClientRect();
+    const h = slash.el.offsetHeight;
+    const below = rect.bottom + 6;
+    slash.el.style.left = Math.min(rect.left, window.innerWidth - slash.el.offsetWidth - 8) + 'px';
+    slash.el.style.top = (below + h > window.innerHeight - 8 ? Math.max(8, rect.top - h - 6) : below) + 'px';
+    const active = slash.el.querySelector('.menu-item.active');
+    if (active) active.scrollIntoView({ block: 'nearest' });
+  }
+
+  function closeSlash() {
+    if (!slash) return;
+    if (slash.el) slash.el.remove();
+    slash = null;
+  }
+
+  function runSlash(i) {
+    const cmd = slash && slash.items[i];
+    if (!cmd) return;
+    const { node, offset } = slash;
+    const r = rangeInEditor();
+    const end = r && r.startContainer === node ? r.startOffset : offset + 1 + slash.query.length;
+    closeSlash();
+    // Remove the typed "/query", then run the command where it was.
+    const del = document.createRange();
+    del.setStart(node, offset);
+    del.setEnd(node, Math.min(end, node.length));
+    sel().removeAllRanges();
+    sel().addRange(del);
+    document.execCommand('delete', false, null);
+    history.commit();
+    cmd.run();
+  }
+
+  // Returns true when the key was consumed by the open menu.
+  function slashKey(e) {
+    if (!slash) return false;
+    const n = slash.items.length;
+    if (e.key === 'ArrowDown') slash.index = (slash.index + 1) % n;
+    else if (e.key === 'ArrowUp') slash.index = (slash.index - 1 + n) % n;
+    else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); runSlash(slash.index); return true; }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSlash(); return true; }
+    else return false;
+    e.preventDefault();
+    renderSlash();
+    return true;
+  }
+
+  E.closeSlash = closeSlash;
+
   function onKeyDown(e) {
     if (!root || !(e.target === root || root.contains(e.target))) return;
+    if (slashKey(e)) { e.stopPropagation(); return; }
     const mod = N.isMod(e);
     const key = e.key.length === 1 ? e.key.toLowerCase() : e.key;
     if (mod && !e.altKey && key === 'z') { e.preventDefault(); if (e.shiftKey) E.redo(); else E.undo(); return; }
@@ -864,6 +998,8 @@
 
   function onInput(e) {
     if (!root || e.target !== root) return;
+    if (slash) setTimeout(updateSlash, 0);
+    else maybeOpenSlash(e);
     if (e.inputType === 'insertParagraph') {
       const li = closestIn(sel().anchorNode, 'ul.checklist > li');
       if (li) li.removeAttribute('data-checked');
@@ -1121,6 +1257,7 @@
     document.addEventListener('selectionchange', () => {
       const r = rangeInEditor();
       if (r) savedRange = r.cloneRange();
+      if (slash) updateSlash();
       updateTableTools();
     });
   };

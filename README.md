@@ -41,6 +41,7 @@ Tests: `python3 -m unittest discover -s tests`
 - Editor: Title, Heading, Subheading, Body, Monostyled; bold, italic, underline, strikethrough, text colours;
   bulleted, dashed and numbered lists; checklists; block quotes; indentation; tables; images, file attachments
   and sketches; automatic links; `* `, `- `, `1. ` and `[] ` start lists as you type
+- Optional slash commands: type `/` to turn a line into a title, list, checklist, table and more (Settings → Slash commands, off by default)
 - `#hashtags` become tags in the sidebar
 - Search across all notes, with matches highlighted in the list and the note
 - Password-locked notes (encrypted at rest), pin notes, duplicate, move, drag notes onto folders

@@ -558,6 +558,9 @@
     input.click();
   }
 
+  A.insertPhotos = () => { const range = N.editor.saveRange(); pickFiles('image/*', (f) => N.editor.insertFiles(f, range)); };
+  A.attachFile = () => { const range = N.editor.saveRange(); pickFiles('', (f) => N.editor.insertFiles(f, range)); };
+
   function mediaMenu(anchor) {
     const range = N.editor.saveRange();
     N.ui.menuFor(anchor, [
@@ -688,6 +691,7 @@
           ${check('groupByDate', 'Group notes by date', S.settings.groupByDate !== false)}
           ${check('sortChecked', 'Sort checked items to the bottom', !!S.settings.sortChecked)}
           ${check('showCounts', 'Show note counts', S.settings.showCounts !== false)}
+          ${check('slashCommands', 'Slash commands — type / to format a line', !!S.settings.slashCommands)}
         </div></div>
         <div class="pref-row"><span>Locked notes:</span><div>
           ${S.lock.configured ? '<button class="push-btn" data-pref="changePassword">Change Password…</button>' : '<span class="pref-muted">No password set yet</span>'}
@@ -726,6 +730,7 @@
       ['Table', 'Ctrl+Alt+T'], ['Indent / outdent', 'Ctrl+] / Ctrl+['], ['Bold / italic / underline', 'Ctrl+B / I / U'],
       ['Paste and match style', 'Ctrl+Shift+V'], ['List / gallery view', 'Ctrl+1 / Ctrl+2'], ['Show or hide folders', 'Ctrl+Alt+S'],
       ['Bigger / smaller text', 'Ctrl+= / Ctrl+-'],
+      ['Command menu (enable in Settings)', '/'],
     ];
     N.ui.sheet({
       title: 'Keyboard Shortcuts', icon: false, wide: true,
