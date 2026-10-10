@@ -59,8 +59,8 @@
 }
 
 :root[data-theme="dark"] {
-  --sidebar-bg: #2a292c;
-  --sidebar-rgb: 40, 38, 44;
+  --sidebar-bg: #161616;
+  --sidebar-rgb: 22, 22, 22;
   --list-bg: #1e1e1e;
   --editor-bg: #1e1e1e;
   --text: #e9e9eb;

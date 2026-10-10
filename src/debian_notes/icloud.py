@@ -702,7 +702,8 @@ class ICloudImporter:
     def sync_config(self):
         cfg = self.store.get_setting("icloud.sync") if threading.current_thread() is threading.main_thread() \
             else self._on_main(lambda: self.store.get_setting("icloud.sync"))
-        return dict({"enabled": False, "interval": 15, "keepFolders": True, "folders": None}, **(cfg or {}))
+        # interval 0 = manual: only sync when the user clicks Sync (the default).
+        return dict({"enabled": False, "interval": 0, "keepFolders": True, "folders": None}, **(cfg or {}))
 
     def set_sync_config(self, changes):
         changes = changes or {}
@@ -724,7 +725,9 @@ class ICloudImporter:
         cfg = self.sync_config()
         if not cfg["enabled"]:
             return False
-        minutes = max(1, int(cfg.get("interval") or 15))
+        minutes = int(cfg.get("interval") or 0)
+        if minutes <= 0:
+            return False  # manual sync only
         self.sync_timer = GLib.timeout_add_seconds(minutes * 60, self._tick)
         return False
 
@@ -732,7 +735,8 @@ class ICloudImporter:
         self.sync_now(quiet=True)
         return True
 
-    def sync_now(self, quiet=False):
+    def sync_now(self, quiet=False, outgoing=None):
+        """Pull from iCloud; with `outgoing` (local edits/new notes, prepared by the page) also push."""
         if self.busy:
             return
         self.busy = True
@@ -740,7 +744,7 @@ class ICloudImporter:
 
         def run():
             try:
-                self._sync()
+                self._sync(outgoing)
             except NotSignedIn:
                 self.client = None
                 self._set_sync_state("signin-needed", message="Sign in to iCloud to keep syncing.")
@@ -828,7 +832,7 @@ class ICloudImporter:
         except OSError:
             pass
 
-    def _sync(self):
+    def _sync(self, outgoing=None):
         self._ensure_client()
         if self.records is None:
             self.records, self.token = self._load_cache()
@@ -874,6 +878,8 @@ class ICloudImporter:
 
         stats = self._apply_changes(touched_notes | content_notes, content_notes, removed, full)
         self._save_cache()
+        if outgoing:
+            self._push_outgoing(outgoing, stats)
         self._log({"sync": stats})
         self._set_sync_state("idle", last=time.time(), changes=stats)
 
@@ -1010,7 +1016,7 @@ class ICloudImporter:
         payload = json.dumps(dict(result, noteId=note_id))
         GLib.idle_add(lambda: (self.win.eval_js(f"window.N && N.sync && N.sync.onPush({payload})"), False)[1])
 
-    def _push(self, note_id, payload):
+    def _push(self, note_id, payload, folder=None):
         self._ensure_client()
         state = self._on_main(lambda: self.store.import_state(SOURCE))
         if any(st["note_id"] == note_id and st["present"] for st in state.values()):
@@ -1019,7 +1025,7 @@ class ICloudImporter:
         if not any(r.get("text", "").strip() for p in paragraphs for r in p.get("runs", [])):
             return {"ok": False, "message": "This note is empty."}
 
-        folder = self._push_folder()
+        folder = folder or self._push_folder()
         now = time.time()
         record_name = str(uuid.uuid4()).upper()
         blob, text = an.build_note_store(paragraphs, uuid.uuid4().bytes, now, lambda: uuid.uuid4().bytes)
@@ -1225,6 +1231,65 @@ class ICloudImporter:
         self._save_cache()
         self._log({"push_done": name, "verified": verified})
         return {"ok": True, "verified": verified, "updated": True}
+
+    # ------------------------------------------------------ two-way sync
+
+    def sync_candidates(self):
+        """Local changes a two-way sync would send (main thread). New notes only count when created after
+        pushing was enabled and when they live in a folder that exists in iCloud."""
+        since = self.store.get_setting("icloud.pushSince")
+        if since is None:
+            since = time.time()
+            self.store.set_setting("icloud.pushSince", since)
+        cfg = self.sync_config()
+        state = self.store.import_state(SOURCE)
+        tracked = {st["note_id"] for st in state.values() if st["present"]}
+        edited = [st["note_id"] for st in state.values()
+                  if st["present"] and not st["deleted_at"] and (st["updated_at"] or 0) > (st["modified"] or 0) + 1]
+        folder_map = {local: remote for remote, local in self.store.mapping(FOLDER_SOURCE).items()}
+        if cfg.get("keepFolders", True):
+            folder_map.setdefault(self.store.default_folder_id(), DEFAULT_FOLDER)
+        else:
+            icloud_folder = self.store.find_or_create_folder("iCloud")
+            folder_map = {icloud_folder: DEFAULT_FOLDER}
+        new = []
+        for r in self.store.db.execute("SELECT id, folder_id FROM notes WHERE deleted_at IS NULL AND locked = 0"
+                                       " AND created_at > ?", (since,)):
+            if r["id"] not in tracked and r["folder_id"] in folder_map:
+                new.append({"id": r["id"], "folder": folder_map[r["folder_id"]]})
+        rows = {r["id"]: r for r in self.store.db.execute(
+            "SELECT id, body, locked FROM notes WHERE id IN (%s)" % ",".join("?" * len(edited + [n["id"] for n in new]) or "0"),
+            edited + [n["id"] for n in new])}
+        return {
+            "edited": [{"id": i, "body": rows[i]["body"]} for i in edited if i in rows and not rows[i]["locked"]],
+            "new": [dict(n, body=rows[n["id"]]["body"]) for n in new if n["id"] in rows and rows[n["id"]]["body"].strip()],
+        }
+
+    def _push_outgoing(self, outgoing, stats):
+        stats.update(sent=0, created=0, skipped=0, skippedReasons=[])
+        for item in outgoing.get("edited") or []:
+            try:
+                name, st = self._tracked(item["id"])
+                # Pull may have turned it into a conflict (no longer tracked) or it changed again: then don't push.
+                if name is None or st["deleted_at"] or (st["updated_at"] or 0) <= (st["modified"] or 0) + 1:
+                    continue
+                res = self._push_changes(item["id"], item)
+                if res.get("ok") and not res.get("unchanged"):
+                    stats["sent"] += 1
+                    stats["changed"].append(item["id"])
+            except Exception as exc:
+                stats["skipped"] += 1
+                stats["skippedReasons"].append(str(exc)[:120])
+                self._log({"sync_push_skip": item["id"], "error": repr(exc)})
+        for item in outgoing.get("new") or []:
+            try:
+                res = self._push(item["id"], item, folder=item.get("folder"))
+                if res.get("ok"):
+                    stats["created"] += 1
+            except Exception as exc:
+                stats["skipped"] += 1
+                stats["skippedReasons"].append(str(exc)[:120])
+                self._log({"sync_push_skip": item["id"], "error": repr(exc)})
 
     def _push_folder(self):
         """The iCloud folder pushed notes go into; created on first use."""

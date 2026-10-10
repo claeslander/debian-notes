@@ -29,7 +29,9 @@ DRAG_THRESHOLD = 4
 GTK_CSS = b"""
 .notes-titlebar { min-height: 0; padding: 0; margin: 0; border: none; background: none; box-shadow: none; }
 window.notes-window { background: transparent; }
-window.notes-window decoration { border-radius: 10px; }
+window.notes-window decoration { border-radius: 10px; border: none;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.30), 0 0 0 1px rgba(0, 0, 0, 0.10); }
+window.notes-window decoration:backdrop { box-shadow: 0 6px 18px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.08); }
 window.notes-window.maximized decoration { border-radius: 0; }
 """
 
@@ -308,8 +310,11 @@ class Api:
     def icloudSignOut(self):
         self._icloud().sign_out()
 
-    def icloudSyncNow(self):
-        self._icloud().sync_now()
+    def icloudSyncNow(self, outgoing=None):
+        self._icloud().sync_now(outgoing=outgoing)
+
+    def icloudSyncCandidates(self):
+        return self._icloud().sync_candidates()
 
     def icloudSetSync(self, changes):
         return self._icloud().set_sync_config(changes)
@@ -341,10 +346,12 @@ class Api:
         return dict(imp.sync_state, enabled=imp.sync_config()["enabled"])
 
     def start_sync_if_enabled(self):
-        if (self.store.get_setting("icloud.sync") or {}).get("enabled"):
+        cfg = self.store.get_setting("icloud.sync") or {}
+        if cfg.get("enabled"):
             imp = self._icloud()
             imp.schedule()
-            GLib.timeout_add_seconds(5, lambda: (imp.sync_now(quiet=True), False)[1])
+            if int(cfg.get("interval") or 0) > 0:  # automatic mode also syncs at startup; manual mode waits
+                GLib.timeout_add_seconds(5, lambda: (imp.sync_now(quiet=True), False)[1])
         return False
 
     # --------------------------------------------------------------- window
@@ -395,8 +402,9 @@ class NotesWindow(Gtk.ApplicationWindow):
         visual = screen.get_rgba_visual()
         self.rounded = bool(visual and screen.is_composited())
         if self.rounded:
+            # The window background is made transparent through CSS (GTK_CSS). Not app-paintable: that
+            # would also stop GTK from drawing the shadow area, which then shows up as a black border.
             self.set_visual(visual)
-            self.set_app_paintable(True)
         self.set_default_size(int(store.get_setting("window.width", 1180)), int(store.get_setting("window.height", 760)))
         if store.get_setting("window.maximized", False):
             self.maximize()
