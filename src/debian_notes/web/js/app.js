@@ -759,8 +759,9 @@
         </div></div>
         <div class="pref-row"><span>iCloud:</span><div class="pref-checks">
           ${check('icloudSync', 'Keep notes in sync with iCloud (download only)', !!(S.settings['icloud.sync'] || {}).enabled)}
-          <div class="pref-inline">Check every ${sel('icloudInterval', [[5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, 'hour']], (S.settings['icloud.sync'] || {}).interval || 15)}
-          <button class="push-btn" data-pref="syncNow">Sync Now</button></div>
+          <div class="pref-inline">Check every ${sel('icloudInterval', [[5, '5 minutes'], [15, '15 minutes'], [30, '30 minutes'], [60, 'hour']], (S.settings['icloud.sync'] || {}).interval || 15)}</div>
+          <div class="pref-inline"><button class="push-btn" data-pref="syncNow">Sync Now</button>
+          <span class="pref-muted">${N.sync.state.last ? 'Last synced ' + relTime(N.sync.state.last) : ''}</span></div>
           <span class="pref-muted">Changes made here are never sent to iCloud. If a note changes in both places, both versions are kept.</span>
         </div></div>
         <div class="pref-row"><span>Locked notes:</span><div>

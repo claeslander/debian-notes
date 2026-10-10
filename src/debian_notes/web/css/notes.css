@@ -536,7 +536,7 @@ body.list-focused:not(.window-inactive) .note-row.selected .note-folder { color:
   user-select: none;
 }
 .sheet-backdrop.open .sheet { transform: none; opacity: 1; }
-.sheet.wide { width: 470px; text-align: left; }
+.sheet.wide { width: 520px; max-width: calc(100vw - 40px); text-align: left; }
 .sheet-icon { display: flex; justify-content: center; color: var(--secondary); }
 .sheet-icon svg { width: 60px; height: 60px; }
 .sheet-title { font-weight: 700; font-size: 14px; margin: 10px 0 6px; }
