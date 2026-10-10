@@ -256,7 +256,6 @@
 
   // ------------------------------------------------------------ iCloud sync
 
-  const SYNC_ICON = { idle: 'cloud', syncing: 'sync', pushing: 'sync', 'signin-needed': 'cloudAlert', error: 'cloudAlert', offline: 'cloudAlert' };
   N.sync = Object.assign(N.sync || {}, {
     state: { state: 'off' },
     onStatus(st) {
