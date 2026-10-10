@@ -298,7 +298,7 @@
     bar.hidden = false;
     const text = {
       idle: st.last ? `Synced ${relTime(st.last)}` : 'iCloud',
-      syncing: 'Pulling from iCloud…',
+      syncing: 'Pulling from iCloud…' + (st.progress && / of /.test(st.progress) ? ' ' + st.progress : ''),
       pushing: 'Pushing to iCloud…',
       'signin-needed': 'Sign in to keep syncing',
       offline: 'Offline',

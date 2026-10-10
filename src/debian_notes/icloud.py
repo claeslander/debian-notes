@@ -740,7 +740,7 @@ class ICloudImporter:
         if self.busy:
             return
         self.busy = True
-        self._set_sync_state("syncing")
+        self._set_sync_state("syncing", progress="")
 
         def run():
             try:
@@ -815,6 +815,12 @@ class ICloudImporter:
             raise NotSignedIn()
         self.client = client
 
+    def _ensure_cache(self):
+        """Load the record cache together with its sync token (never one without the other)."""
+        if self.records is None:
+            records, token = self._load_cache()
+            self.records, self.token = (records or {}), (token if records is not None else None)
+
     def _load_cache(self):
         try:
             with open(self.cache_path, encoding="utf-8") as fh:
@@ -846,6 +852,7 @@ class ICloudImporter:
             self.records = {}
 
         removed, touched_notes, content_notes = set(), set(), set()
+        self._set_sync_state("syncing", progress=f"{len(delta)} changes")
         for rec in delta:
             name = rec.get("recordName")
             if not name:
@@ -875,6 +882,9 @@ class ICloudImporter:
                     if note:
                         content_notes.add(note)
         self.token = token
+        if full:
+            # Everything arrives in a full resync; attachment records alone don't mean a note changed.
+            content_notes = set()
 
         stats = self._apply_changes(touched_notes | content_notes, content_notes, removed, full)
         self._save_cache()
@@ -898,6 +908,7 @@ class ICloudImporter:
         candidates = set(touched) | set(removed)
         if full:
             candidates |= {r["recordName"] for r in self._notes()}
+        self._progress = [0, len(candidates)]
         for name in candidates:
             rec = self.records.get(name)
             st = state.get(name)
@@ -1059,7 +1070,7 @@ class ICloudImporter:
         if back and not back[0].get("serverErrorCode"):
             data = rec_bytes(back[0], "TextDataEncrypted")
             verified = bool(data) and an.plain_text(an.parse_note_store(data)) == text
-            self.records = self.records if self.records is not None else self._load_cache()[0] or {}
+            self._ensure_cache()
             self.records[record_name] = back[0]
         remote_modified = rec_time(back[0], "ModificationDate", "modified") if back else now
 
@@ -1216,8 +1227,7 @@ class ICloudImporter:
             if text is not None:
                 data = rec_bytes(back[0], "TextDataEncrypted")
                 verified = bool(data) and an.plain_text(an.parse_note_store(data)) == text
-            if self.records is None:
-                self.records = self._load_cache()[0] or {}
+            self._ensure_cache()
             self.records[name] = back[0]
         remote_modified = rec_time(back[0], "ModificationDate", "modified") if back else time.time()
 
@@ -1342,8 +1352,7 @@ class ICloudImporter:
         known = self._on_main(lambda: self.store.mapping(PUSH_SOURCE + "-folder")).get("folder")
         if known:
             return known
-        if self.records is None:
-            self.records = self._load_cache()[0] or {}
+        self._ensure_cache()
         for rec in self.records.values():
             if rec.get("recordType") == "Folder" and not rec_int(rec, "Deleted") and \
                     rec_text(rec, "TitleEncrypted") == PUSH_FOLDER_NAME:
@@ -1409,6 +1418,9 @@ class ICloudImporter:
         threading.Thread(target=run, daemon=True).start()
 
     def _item(self, rec, stats, keep_folders, pinned):
+        if getattr(self, "_progress", None):
+            self._progress[0] += 1
+            self._set_sync_state("syncing", progress=f"{self._progress[0]} of {self._progress[1]}")
         try:
             item = self._convert(rec, stats)
         except Exception as exc:
@@ -1497,27 +1509,26 @@ class ICloudImporter:
         filename = (media and rec_text(media, "FilenameEncrypted", "Filename")) or rec_text(rec, "TitleEncrypted", "Title") or "attachment"
 
         if asset and IMAGE_UTI.search(uti):
-            path = self._save(self.client.download(asset, filename), filename)
-            path = _browser_image(path)
+            path = self._fetch_asset(asset, filename, image=True)
             stats["attachments"] += 1
             return f'<img class="nt-img" src="{_esc(GLib.filename_to_uri(path))}" alt="">'
 
         # Drawings, scans, PDFs and other rich attachments: use the preview image when there is one.
         preview = self._preview_asset(rec)
         if preview and (not asset or re.search(r"drawing|gallery|paper", uti)):
-            path = self._save(self.client.download(preview, "preview.png"), (filename or "preview") + ".png")
+            path = self._fetch_asset(preview, (filename or "preview") + ".png")
             stats["attachments"] += 1
             cls = "nt-img nt-sketch" if "drawing" in uti else "nt-img"
             return f'<img class="{cls}" src="{_esc(GLib.filename_to_uri(path))}" alt="">'
 
         if asset:
-            data = self.client.download(asset, filename)
-            path = self._save(data, filename)
+            path = self._fetch_asset(asset, filename)
+            data_len = os.path.getsize(path)
             stats["attachments"] += 1
             uri = GLib.filename_to_uri(path)
             return (f'<a class="nt-file" contenteditable="false" href="{_esc(uri)}"><span class="nt-file-icon"></span>'
                     f'<span class="nt-file-meta"><span class="nt-file-name">{_esc(filename)}</span>'
-                    f'<span class="nt-file-size">{_size(len(data))}</span></span></a>')
+                    f'<span class="nt-file-size">{_size(data_len)}</span></span></a>')
         return None
 
     def _preview_asset(self, rec):
@@ -1529,6 +1540,31 @@ class ICloudImporter:
                 return max(zip(widths, assets), key=lambda wa: wa[0] or 0)[1]
             return assets[-1]
         return rec_asset(rec, "FallbackImage", "PreviewImage")
+
+    def _fetch_asset(self, asset, filename, image=False):
+        """Download an iCloud asset once; later syncs reuse the file with the same checksum."""
+        index_path = os.path.join(self.data_dir, "icloud-assets.json")
+        if getattr(self, "_assets", None) is None:
+            try:
+                with open(index_path, encoding="utf-8") as fh:
+                    self._assets = json.load(fh)
+            except (OSError, ValueError):
+                self._assets = {}
+        key = asset.get("fileChecksum") or asset.get("referenceChecksum")
+        known = key and self._assets.get(key)
+        if known and os.path.exists(known):
+            return known
+        path = self._save(self.client.download(asset, filename), filename)
+        if image:
+            path = _browser_image(path)
+        if key:
+            self._assets[key] = path
+            try:
+                with open(index_path, "w", encoding="utf-8") as fh:
+                    json.dump(self._assets, fh)
+            except OSError:
+                pass
+        return path
 
     def _save(self, data, filename):
         base = re.sub(r"[^\w.\- ]+", "_", os.path.basename(filename or "attachment")).strip() or "attachment"

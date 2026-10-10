@@ -49,6 +49,7 @@ class ImporterConversionTest(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.store = Store(self.tmp.name)
         imp = object.__new__(icloud.ICloudImporter)  # skip the WebKit sign-in profile
+        imp._set_sync_state = lambda *a, **k: None   # no window to report progress to
         imp.store = self.store
         imp.account = {"name": "Test"}
         imp.client = None
@@ -288,6 +289,18 @@ class PushChangesTest(unittest.TestCase):
         self.assertEqual(stats["deleted"], 1)
         self.assertEqual(self.cloud.records["N1"]["fields"]["Folder"]["value"]["recordName"], "TrashFolder-CloudKit")
         self.assertEqual(self.imp.sync_candidates()["deleted"], [])  # not sent twice
+
+    def test_cache_keeps_its_sync_token(self):
+        # Regression: loading the cache lazily (e.g. for a push) used to drop the token, forcing a full resync.
+        import json as _json
+        with open(self.imp.cache_path, "w") as fh:
+            _json.dump({"token": "TOKEN-1", "records": {"X": {"recordName": "X"}}}, fh)
+        self.imp.records, self.imp.token = None, None
+        self.imp._ensure_cache()
+        self.assertEqual((self.imp.token, list(self.imp.records)), ("TOKEN-1", ["X"]))
+        self.imp._save_cache()
+        with open(self.imp.cache_path) as fh:
+            self.assertEqual(_json.load(fh)["token"], "TOKEN-1")
 
     def test_move_to_recently_deleted(self):
         self.store.delete_note(self.nid)  # already gone locally (deleted from Recently Deleted)
