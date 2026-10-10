@@ -42,6 +42,7 @@
 
   // Sidebar transparency: 0 (off) .. 0.2. Older setting `translucentSidebar: false` means off.
   function sidebarGlass() {
+    if (S.settings.noTransparency) return 0;
     if (S.settings.sidebarGlass !== undefined) return +S.settings.sidebarGlass || 0;
     return S.settings.translucentSidebar === false ? 0 : 0.04;
   }
@@ -53,6 +54,7 @@
     body.classList.toggle('sidebar-hidden', S.settings.sidebarVisible === false);
     const glass = sidebarGlass();
     body.classList.toggle('glass', glass > 0);
+    body.classList.toggle('no-transparency', !!S.settings.noTransparency);
     document.documentElement.style.setProperty('--glass', String(glass));
     body.classList.toggle('view-gallery', S.view === 'gallery');
     body.classList.toggle('gallery-open', S.view === 'gallery' && S.galleryOpen);
@@ -942,7 +944,10 @@
         <div class="pref-row"><span>Appearance:</span>${sel('appearance', [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']], S.settings.appearance || 'system')}</div>
         <div class="pref-row"><span>Default text size:</span>${sel('textSize', [12, 13, 14, 15, 16, 17, 18, 20, 22].map((s) => [s, s + ' pt']), S.settings.textSize || 15)}</div>
         <div class="pref-row"><span>New notes start with:</span>${sel('newNoteStyle', [['title', 'Title'], ['heading', 'Heading'], ['subheading', 'Subheading'], ['body', 'Body']], S.settings.newNoteStyle || 'title')}</div>
-        <div class="pref-row"><span>Sidebar transparency:</span>${sel('sidebarGlass', [[0, 'Off'], [0.04, 'Subtle'], [0.1, 'Light'], [0.2, 'Medium']], sidebarGlass())}</div>
+        <div class="pref-row pref-top"><span>Transparency:</span><div class="pref-checks">
+          ${check('noTransparency', 'Disable transparency', !!S.settings.noTransparency)}
+          <div class="pref-inline" data-glass-row ${S.settings.noTransparency ? 'hidden' : ''}>Sidebar ${sel('sidebarGlass', [[0.04, 'subtle'], [0.1, 'light'], [0.2, 'medium']], sidebarGlass() || 0.04)}</div>
+        </div></div>
         <div class="pref-row"><span>Sort notes by:</span>${sel('sortBy', [['updated', 'Date Edited'], ['created', 'Date Created'], ['title', 'Title']], S.settings.sortBy || 'updated')}</div>
         <div class="pref-row"><span></span><div class="pref-checks">
           ${check('groupByDate', 'Group notes by date', S.settings.groupByDate !== false)}
@@ -984,6 +989,10 @@
           if (['sortBy', 'groupByDate'].includes(t.name)) N.notelist.render();
           if (t.name === 'showCounts') N.sidebar.render();
           if (t.name === 'sidebarGlass') applyLayout();
+          if (t.name === 'noTransparency') {
+            applyLayout();
+            sheet.querySelector('[data-glass-row]').hidden = t.checked;
+          }
         });
         sheet.addEventListener('click', (e) => {
           if (e.target.closest('[data-pref="syncNow"]')) { A.pull(); return; }
