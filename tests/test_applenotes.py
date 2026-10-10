@@ -122,7 +122,7 @@ class TableDecodingTest(unittest.TestCase):
     def test_table(self):
         # Mergeable-data layout: entries reference each other by index; rows/columns are ordered
         # sets of UUIDs; cells are a dictionary column -> (row -> Note).
-        uuids = [b"R0", b"R1", b"C0", b"C1"]
+        uuids = [b"R0", b"R1", b"C0", b"C1", b"RX"]
         keys = ["crRows", "crColumns", "cellColumns"]
         types = ["com.apple.notes.ICTable", "com.apple.CRDT.NSUUID"]
         entries = []
@@ -137,12 +137,15 @@ class TableDecodingTest(unittest.TestCase):
         def uuid_ref(u):  # custom map whose first entry points at uuid index u
             return add(f(13, f(1, 1) + f(3, f(1, 0) + f(2, f(2, u)))))
 
-        def ordered(us):
+        def ordered(us, live=None):
             arr = b"".join(f(2, f(1, n) + f(2, uuids[u])) for n, u in enumerate(us))
-            return add(f(16, f(1, f(1, arr))))
+            elements = b""
+            if live is not None:
+                elements = f(2, b"".join(f(1, f(1, oid_index(uuid_ref(u))) + f(2, oid_index(uuid_ref(u)))) for u in live))
+            return add(f(16, f(1, f(1, arr)) + elements))
 
         cell_text = {(0, 0): "Product", (0, 1): "Amount", (1, 0): "Milk", (1, 1): "2"}
-        rows_idx = ordered([0, 1])
+        rows_idx = ordered([0, 4, 1], live=[0, 1])  # row uuid 4 was deleted in Notes
         cols_idx = ordered([2, 3])
         col_entries = b""
         for c, cu in enumerate([2, 3]):

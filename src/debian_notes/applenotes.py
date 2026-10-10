@@ -304,6 +304,9 @@ def summarize(note_text):
 # ------------------------------------------------------------------------- tables
 
 
+TABLE_STATS = {}  # structural info about the last decoded table (no content), for the import log
+
+
 def table_to_html(data, resolve=None):
     """Decode a com.apple.notes.table mergeable-data blob into an HTML table."""
     root = Msg(decompress(data))
@@ -345,26 +348,44 @@ def table_to_html(data, resolve=None):
             refs[keys[k]] = object_index(me.msg(2))
 
     def ordered(idx):
-        indices = {}
+        """Ordered set -> ({uuid index: position}, live positions). The ordering array is a CRDT and
+        keeps deleted items; only those listed in the set's elements dictionary still exist."""
         oset = entry(idx).msg(16)
         ordering = oset.msg(1) if oset else None
         if ordering is None:
-            return indices
+            return {}, set()
         array = ordering.msg(1)
-        for n, att in enumerate(array.msgs(2) if array else []):
+        order = []
+        for att in array.msgs(2) if array else []:
             uuid = att.bytes(2)
-            if uuid in uuids:
-                indices[uuids.index(uuid)] = n
+            order.append(uuids.index(uuid) if uuid in uuids else None)
+        position = {u: n for n, u in enumerate(order) if u is not None}
+        aliases = {}  # value uuid -> array uuid it stands for
         contents = ordering.msg(2)
         for el in contents.msgs(1) if contents else []:
             k = target_uuid(object_index(el.msg(1)))
             v = target_uuid(object_index(el.msg(2)))
-            if k in indices and v is not None:
-                indices[v] = indices[k]
-        return indices
+            if k is not None and v is not None:
+                aliases[v] = k
+        live = set()
+        elements = oset.msg(2)
+        for el in elements.msgs(1) if elements else []:
+            for side in (el.msg(1), el.msg(2)):
+                u = target_uuid(object_index(side))
+                if u is not None:
+                    live.add(aliases.get(u, u))
+        # Positions over the full ordering; also report which positions are live.
+        out = dict(position)
+        for v, k in aliases.items():
+            if k in position:
+                out[v] = position[k]
+        live_positions = {position[u] for u in position if not live or u in live}
+        return out, live_positions
 
-    rows = ordered(refs.get("crRows", -1))
-    cols = ordered(refs.get("crColumns", -1))
+    stats = TABLE_STATS
+    rows, live_rows = ordered(refs.get("crRows", -1))
+    cols, live_cols = ordered(refs.get("crColumns", -1))
+    stats.clear()
     n_rows = max(rows.values(), default=-1) + 1
     n_cols = max(cols.values(), default=-1) + 1
     grid = [["" for _ in range(n_cols)] for _ in range(n_rows)]
@@ -387,6 +408,12 @@ def table_to_html(data, resolve=None):
     if "RightToLeft" in direction:
         grid = [list(reversed(r)) for r in grid]
 
+    # Drop rows/columns that were deleted in Notes. Anything with content is always kept.
+    keep_rows = [i for i in range(n_rows) if i in live_rows or any(grid[i])]
+    keep_cols = [j for j in range(n_cols) if j in live_cols or any(grid[i][j] for i in range(n_rows))]
+    grid = [[grid[i][j] for j in keep_cols] for i in keep_rows]
+    stats.update(rows=len(keep_rows), cols=len(keep_cols), dropped_rows=n_rows - len(keep_rows),
+                 dropped_cols=n_cols - len(keep_cols), empty=sum(1 for r in grid for c in r if not c))
     if not grid:
         raise ValueError("empty table")
     body = "".join("<tr>" + "".join(f"<td>{c or '<br>'}</td>" for c in r) + "</tr>" for r in grid)

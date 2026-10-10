@@ -666,7 +666,9 @@ class ICloudImporter:
             if not data:
                 return None
             stats["tables"] += 1
-            return an.table_to_html(data, lambda i, u: self._attachment_html(i, u, stats) or "")
+            html = an.table_to_html(data, lambda i, u: self._attachment_html(i, u, stats) or "")
+            self._log({"table": ident, **an.TABLE_STATS})
+            return html
 
         if uti == "public.url":
             url = rec_text(rec, "URLStringEncrypted", "URLString", "URL") or ""
