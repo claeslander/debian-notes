@@ -830,6 +830,8 @@ class ICloudImporter:
             return None, None
 
     def _save_cache(self):
+        if self.records is None:
+            return  # never overwrite the cache with one that wasn't loaded
         tmp = self.cache_path + ".tmp"
         try:
             with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as fh:
@@ -1187,6 +1189,7 @@ class ICloudImporter:
 
     def _push_trash(self, note_ids):
         self._ensure_client()
+        self._ensure_cache()
         # Look at every mapping, also ones whose local note is already gone (deleted right after this call).
         state = self._on_main(lambda: self.store.import_state(SOURCE))
         names = [name for name, st in state.items() if st["note_id"] in note_ids]
@@ -1314,6 +1317,7 @@ class ICloudImporter:
         threading.Thread(target=run, daemon=True).start()
 
     def _push_outgoing(self, outgoing, stats):
+        self._ensure_cache()
         stats.update(sent=0, created=0, skipped=0, skippedReasons=[])
         for item in outgoing.get("edited") or []:
             try:
@@ -1383,6 +1387,7 @@ class ICloudImporter:
         def run():
             try:
                 self._ensure_client()
+                self._ensure_cache()
                 pushed = self._on_main(lambda: self.store.mapping(PUSH_SOURCE))
                 notes = [n for n in pushed if not n.startswith("folder:")]
                 folders = [n[len("folder:"):] for n in pushed if n.startswith("folder:")]

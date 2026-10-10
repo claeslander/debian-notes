@@ -258,3 +258,31 @@ class EditTest(unittest.TestCase):
         blob = note_store(text, [run(u16(t), **kw) for t, kw in parts])
         with self.assertRaises(ValueError):
             self.edit(blob, ["Intro", "x"])
+
+
+class BranchedEditTest(unittest.TestCase):
+    """Two devices typed concurrently: the start sentinel has two branches that meet at the end sentinel."""
+
+    def branched(self):
+        def cid(r, c):
+            return f(1, r) + f(2, c)
+        subs = [
+            f(1, cid(0, 0)) + f(2, 0) + f(3, cid(0, 0)) + f(5, 1) + f(5, 2),
+            f(1, cid(1, 0)) + f(2, 3) + f(3, cid(1, 0)) + f(5, 3),   # "AB\n" from device 1
+            f(1, cid(2, 0)) + f(2, 2) + f(3, cid(2, 0)) + f(5, 3),   # "CD" from device 2
+            f(1, cid(0, an.SENTINEL_END)) + f(2, 0) + f(3, cid(0, an.SENTINEL_END)),
+        ]
+        clock = lambda u: f(1, f(1, u) + f(2, f(1, 3)) + f(2, f(1, 1)))
+        note = f(2, "AB\nCD") + b"".join(f(3, s) for s in subs) + f(4, clock(b"1" * 16) + clock(b"2" * 16)) + f(5, run(5))
+        return gzip.compress(f(1, 0) + f(2, f(1, 0) + f(2, 0) + f(3, note)))
+
+    def test_edit_keeps_branches(self):
+        paras = [{"style": None, "runs": [{"text": "XAB"}]}, {"style": None, "runs": [{"text": "CD!"}]}]
+        blob, text, changed = an.edit_note_store(self.branched(), paras, b"M" * 16, 1790000000, lambda: b"C" * 16)
+        self.assertTrue(changed)
+        note = an.parse_note_store(blob)
+        self.assertEqual(an.plain_text(note), "XAB\nCD!")
+        subs = an._subs(note)
+        self.assertEqual(len(subs[0]["children"]), 2)  # the start sentinel still has both branches
+        end = next(i for i, s in enumerate(subs) if s["clock"] == an.SENTINEL_END)
+        self.assertEqual(sum(end in s["children"] for s in subs), 2)  # and they still meet at the end

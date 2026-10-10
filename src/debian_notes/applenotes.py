@@ -525,15 +525,23 @@ def _subs(note):
 
 
 def _chain(subs):
-    """Substring indices in document order, following child links from the start sentinel."""
-    order, seen, i = [], set(), 0
-    while i is not None and 0 <= i < len(subs) and i not in seen:
-        order.append(i)
+    """Substring indices in document order. The substrings form a graph rooted at the start sentinel;
+    concurrent edits on different devices create branches (a node with several children), which are
+    read depth-first in stored order. The end sentinel, where branches meet again, comes last."""
+    end = next((k for k, x in enumerate(subs) if x["replica"] == 0 and x["clock"] == SENTINEL_END), None)
+    order, seen, stack = [], set(), [0] if subs else []
+    while stack:
+        i = stack.pop()
+        if i in seen or not 0 <= i < len(subs):
+            continue
         seen.add(i)
-        kids = subs[i]["children"]
-        i = kids[0] if kids else None
+        if i != end:
+            order.append(i)
+        stack.extend(reversed(subs[i]["children"]))
+    if end is not None:
+        order.append(end)
     if len(order) != len(subs):
-        raise ValueError("unsupported substring tree")
+        raise ValueError("unsupported substring graph")
     return order
 
 
@@ -633,50 +641,92 @@ def edit_note_store(old_blob, paragraphs, replica_uuid, timestamp, uuid_factory)
             inserts.setdefault(a1 - 1 if op == "replace" else a0 - 1, []).extend(new_units[b0:b1])
     changed = bool(inserts) or not all(keep)
 
-    pieces = []
+    # Nodes of the new graph. Each original substring becomes one or more pieces (split where characters are
+    # kept or deleted, or where text is inserted); pieces keep the original links between substrings, so
+    # branches from other devices stay exactly as they were.
+    nodes = []
+    first, last = {}, {}
+    # Character id -> UTF-16 unit, for the strict self-check below.
+    unit_of, vi0 = {}, 0
+    for i in order:
+        x = subs[i]
+        if not x["tomb"]:
+            for k in range(x["length"]):
+                unit_of[(x["replica"], x["clock"] + k)] = old_units[vi0]
+                vi0 += 1
 
-    def insert_after(pos):
+    def node(**kw):
+        nodes.append(dict(kw, children=[]))
+        return len(nodes) - 1
+
+    def insertion(pos):
         nonlocal next_char
         units = inserts.pop(pos, None)
-        if units:
-            pieces.append({"replica": me, "clock": next_char, "length": len(units),
-                           "ts_replica": me, "ts_clock": ts_clock, "tomb": 0})
-            next_char += len(units)
+        if not units:
+            return None
+        n = node(replica=me, clock=next_char, length=len(units), ts_replica=me, ts_clock=ts_clock, tomb=0)
+        for k, u in enumerate(units):
+            unit_of[(me, next_char + k)] = u
+        next_char += len(units)
+        return n
 
     vi = 0
+    start_insert = None
     for i in order:
         s = subs[i]
-        if s["replica"] == 0 and s["clock"] == SENTINEL_END:
-            continue
+        seq = []
         if s["tomb"] or s["length"] == 0:
-            pieces.append(dict(s))  # tombstones and the start sentinel are kept as they are
-        if s["replica"] == 0 and s["clock"] == 0:
-            insert_after(-1)
-            continue
-        if s["tomb"] or s["length"] == 0:
-            continue
-        start = 0
-        for k in range(s["length"]):
-            last_of_group = k == s["length"] - 1 or keep[vi] != keep[vi + 1] or (vi in inserts)
-            if last_of_group:
-                alive = keep[vi]
-                pieces.append({"replica": s["replica"], "clock": s["clock"] + start, "length": k - start + 1,
-                               "ts_replica": s["ts_replica"] if alive else me,
-                               "ts_clock": s["ts_clock"] if alive else ts_clock, "tomb": 0 if alive else 1})
-                insert_after(vi)
-                start = k + 1
-            vi += 1
+            seq.append(node(**{k: s[k] for k in ("replica", "clock", "length", "ts_replica", "ts_clock", "tomb")}))
+            if s["replica"] == 0 and s["clock"] == 0:
+                start_insert = insertion(-1)
+        else:
+            start = 0
+            for k in range(s["length"]):
+                if k == s["length"] - 1 or keep[vi] != keep[vi + 1] or vi in inserts:
+                    alive = keep[vi]
+                    seq.append(node(replica=s["replica"], clock=s["clock"] + start, length=k - start + 1,
+                                    ts_replica=s["ts_replica"] if alive else me,
+                                    ts_clock=s["ts_clock"] if alive else ts_clock, tomb=0 if alive else 1))
+                    ins = insertion(vi)
+                    if ins is not None:
+                        seq.append(ins)
+                    start = k + 1
+                vi += 1
+        for a_, b_ in zip(seq, seq[1:]):
+            nodes[a_]["children"] = [b_]
+        first[i], last[i] = seq[0], seq[-1]
     if inserts:
         raise ValueError("couldn't place every insertion")
-    pieces.append({"replica": 0, "clock": SENTINEL_END, "length": 0, "ts_replica": 0, "ts_clock": SENTINEL_END, "tomb": 0})
+    for i in order:
+        nodes[last[i]]["children"] = [first[c] for c in subs[i]["children"] if c in first]
+    if start_insert is not None:
+        # Text typed at the very beginning joins the first branch; the start sentinel keeps its other branches.
+        start_node = first[order[0]]
+        kids = nodes[start_node]["children"]
+        nodes[start_insert]["children"] = kids[:1]
+        nodes[start_node]["children"] = [start_insert] + kids[1:]
+
+    # Number the nodes in document order (start sentinel first, end sentinel last).
+    new_order = _chain(nodes)
+    # Strict self-check: spell the visible text from character ids in the new graph.
+    spelled = [unit_of.get((nodes[n]["replica"], nodes[n]["clock"] + k))
+               for n in new_order if not nodes[n]["tomb"] for k in range(nodes[n]["length"])]
+    if spelled != new_units:
+        raise ValueError("edited note failed its consistency check")
+    index = {old: new for new, old in enumerate(new_order)}
+    pieces = []
+    for old in new_order:
+        p = dict(nodes[old])
+        p["children"] = [index[c] for c in p["children"]]
+        pieces.append(p)
 
     enc_subs = []
-    for n, p in enumerate(pieces):
+    for p in pieces:
         body = _fb(1, _char_id(p["replica"], p["clock"])) + _fi(2, p["length"]) + _fb(3, _char_id(p["ts_replica"], p["ts_clock"]))
         if p["tomb"]:
             body += _fi(4, 1)
-        if n < len(pieces) - 1:
-            body += _fi(5, n + 1)
+        for c in p["children"]:
+            body += _fi(5, c)
         enc_subs.append(body)
 
     clocks[idx][1] = [(next_char, 0), (ts_clock + 1, 0)]

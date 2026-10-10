@@ -302,6 +302,17 @@ class PushChangesTest(unittest.TestCase):
         with open(self.imp.cache_path) as fh:
             self.assertEqual(_json.load(fh)["token"], "TOKEN-1")
 
+    def test_push_trash_never_wipes_the_cache(self):
+        # Regression: pushing a deletion with the cache not loaded saved an empty cache over the real one.
+        import json as _json
+        with open(self.imp.cache_path, "w") as fh:
+            _json.dump({"token": "TOKEN-1", "records": {"N1": self.cloud.records["N1"], "Other": {"recordName": "Other"}}}, fh)
+        self.imp.records, self.imp.token = None, None
+        self.imp._push_trash([self.nid])
+        with open(self.imp.cache_path) as fh:
+            saved = _json.load(fh)
+        self.assertEqual((saved["token"], sorted(saved["records"])), ("TOKEN-1", ["Other"]))
+
     def test_move_to_recently_deleted(self):
         self.store.delete_note(self.nid)  # already gone locally (deleted from Recently Deleted)
         res = self.imp._push_trash([self.nid])
