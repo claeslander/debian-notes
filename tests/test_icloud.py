@@ -174,14 +174,19 @@ class PullSyncTest(ImporterConversionTest):
 
     def test_deleted_on_iphone_goes_to_trash(self):
         self.sync(full=True)
+        nid = self.note()["id"]
         self.imp.records["N1"] = bump(self.imp.records["N1"], Deleted={"value": 1, "type": "INT64"})
         stats = self.sync(touched=["N1"])
         self.assertEqual(stats["removed"], 1)
-        self.assertIsNotNone(self.note()["deleted_at"])
-        # A record removed outright (tombstone) behaves the same.
-        self.store.db.execute("UPDATE notes SET deleted_at = NULL")
-        del self.imp.records["N1"]
+        self.assertIsNotNone(self.store.note_row(nid)["deleted_at"])
+        self.assertIsNone(self.note())  # no longer tracked: nothing left in iCloud to push
+
+    def test_tombstone_goes_to_trash(self):
+        self.sync(full=True)
+        nid = self.note()["id"]
+        del self.imp.records["N1"]  # record removed outright
         self.assertEqual(self.sync(removed=["N1"])["removed"], 1)
+        self.assertIsNotNone(self.store.note_row(nid)["deleted_at"])
 
     def test_pin_and_folder_rename(self):
         self.sync(full=True)
@@ -310,6 +315,17 @@ class PushChangesTest(unittest.TestCase):
         self.assertEqual(cands["edited"], [])  # not pushed over the iPhone's version
         bodies = [self.store.note_row(n["id"])["body"] for n in self.store.notes() if not n["deletedAt"]]
         self.assertTrue(any("mine" in b for b in bodies) and any("theirs" in b for b in bodies))  # both kept
+
+    def test_deleted_in_icloud_is_not_pushed_again(self):
+        self.imp._set_sync_state = lambda *a, **k: None
+        self.imp.sync_config = lambda: {"enabled": True, "keepFolders": True, "folders": None}
+        self.imp._sync()  # first pull: everything known
+        del self.cloud.records["N1"]  # deleted on the iPhone (gone from the zone)
+        self.cloud.notes_records = lambda *a, **k: ([{"recordName": "N1", "deleted": True}], "TOKEN-3")
+        self.imp._sync()
+        self.assertIsNotNone(self.store.note_row(self.nid)["deleted_at"])  # mirrored to Recently Deleted
+        self.assertEqual(self.imp.sync_candidates()["deleted"], [])          # and not offered for Push again
+        self.assertNotIn("N1", self.store.import_state("icloud"))
 
     def test_cache_keeps_its_sync_token(self):
         # Regression: loading the cache lazily (e.g. for a push) used to drop the token, forcing a full resync.

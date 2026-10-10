@@ -927,9 +927,9 @@ class ICloudImporter:
                 continue  # deleted permanently on this computer: respect that
             edited_here = (st["updated_at"] or 0) > (st["modified"] or 0) + 1
             if gone:
-                if st["deleted_at"]:
-                    continue
-                ops.append(("detach" if edited_here else "trash", name, st["note_id"]))
+                # Deleted in iCloud: mirror it (unless edited here) and stop tracking — there is nothing
+                # left in iCloud for a later Push to delete.
+                ops.append(("forget", name) if st["deleted_at"] else ("detach" if edited_here else "trash", name, st["note_id"]))
                 continue
             remote_modified = rec_time(rec, "ModificationDate", "modified")
             if remote_modified > (st["modified"] or 0) + 1 or name in force_content:
@@ -983,8 +983,13 @@ class ICloudImporter:
                     stats["conflicts"] += 1
                 elif kind == "trash":
                     self.store.db.execute("UPDATE notes SET deleted_at = ?, pinned = 0 WHERE id = ?", (now, op[2]))
+                    self.store.forget_import(SOURCE, op[1])
+                    self.store.forget_import(PUSH_SOURCE, op[1])
                     stats["removed"] += 1
                     stats["changed"].append(op[2])
+                elif kind == "forget":
+                    self.store.forget_import(SOURCE, op[1])
+                    self.store.forget_import(PUSH_SOURCE, op[1])
                 elif kind == "detach":
                     self.store.forget_import(SOURCE, op[1])
                 elif kind == "meta":
@@ -1278,6 +1283,10 @@ class ICloudImporter:
             if self.records is not None else {}
         deleted = []
         for name, st in state.items():
+            rec = (self.records or {}).get(name)
+            complete = self.records is not None and bool(self.token)  # a full, current cache
+            if (rec is None and complete) or (rec is not None and self._is_deleted(rec)):
+                continue  # already deleted in iCloud
             if st["deleted_at"] or not st["present"]:
                 title = self.store.db.execute("SELECT title FROM notes WHERE id = ?", (st["note_id"],)).fetchone()
                 deleted.append({"id": st["note_id"], "title": title["title"] if title else titles.get(name, "")})
