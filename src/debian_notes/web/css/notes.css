@@ -557,6 +557,9 @@ body.list-focused:not(.window-inactive) .note-row.selected .note-folder { color:
   padding-top: calc(var(--toolbar-h) + 6px); background: rgba(0, 0, 0, 0); transition: background 0.18s;
 }
 .sheet-backdrop.open { background: rgba(0, 0, 0, 0.14); }
+/* Promote to a compositing layer up front: WebKitGTK creating it when the close animation starts
+   showed up as a one-frame flicker in the transparent window. */
+.sheet-backdrop, .sheet, .importer-backdrop, .importer { will-change: opacity, transform; }
 .sheet {
   width: 300px; padding: 20px 18px 16px; text-align: center;
   background: var(--sheet-bg); border-radius: 12px; border: 0.5px solid var(--menu-border);
@@ -587,6 +590,8 @@ body.list-focused:not(.window-inactive) .note-row.selected .note-folder { color:
 }
 .sheet.wide .push-btn, .sketch-bar .push-btn, .prefs .push-btn { flex: none; min-width: 90px; }
 .push-btn:active { filter: brightness(0.92); }
+.push-btn:focus { outline: none; }
+.push-btn.primary:focus-visible { box-shadow: 0 0 0 3px color-mix(in srgb, var(--btn-primary) 35%, transparent); }
 .push-btn.primary { background: var(--btn-primary); color: #fff; }
 .push-btn.primary.danger { background: #ff3b30; }
 .shake { animation: shake 0.35s; }

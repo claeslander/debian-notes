@@ -235,8 +235,10 @@
         else if (e.key === 'Enter' && primary) { e.preventDefault(); e.stopPropagation(); finish(primary.value); }
       }
       document.addEventListener('keydown', onKey, true);
-      const first = sheet.querySelector('input');
-      setTimeout(() => (first ? first.focus() : btns.lastElementChild.focus()), 30);
+      // Focus the first text field; without one, the default (primary) button, like macOS.
+      const first = sheet.querySelector('input:not([type="checkbox"]):not([type="radio"])');
+      const primaryBtn = btns.querySelector('.push-btn.primary') || btns.lastElementChild;
+      setTimeout(() => (first ? first.focus() : primaryBtn.focus()), 30);
       if (opts.onOpen) opts.onOpen(sheet);
     });
   };
