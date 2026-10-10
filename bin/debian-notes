@@ -1,0 +1,14 @@
+#!/usr/bin/env python3
+"""Launcher: runs from the source tree or from /usr/share/debian-notes when installed."""
+import os
+import sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+for candidate in (os.path.join(here, "..", "src"), "/usr/share/debian-notes"):
+    if os.path.isdir(os.path.join(candidate, "debian_notes")):
+        sys.path.insert(0, os.path.abspath(candidate))
+        break
+
+from debian_notes.app import main  # noqa: E402
+
+sys.exit(main())

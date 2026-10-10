@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<title>Notes</title>
+<link rel="stylesheet" href="css/notes.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <div class="toolbar sidebar-toolbar">
+      <div class="traffic" data-traffic></div>
+      <div class="tb-spacer"></div>
+      <button class="tb-btn" data-action="toggleSidebar" title="Hide Folders (Ctrl+Alt+S)" data-icon="sidebar"></button>
+    </div>
+    <div id="sidebar-scroll" class="sidebar-scroll"></div>
+    <div class="sidebar-footer">
+      <button class="sb-new-folder" data-action="newFolder"><span data-icon="plusCircle"></span>New Folder</button>
+    </div>
+  </aside>
+  <div class="divider" data-divider="sidebar"></div>
+
+  <section id="list-pane">
+    <div class="toolbar list-toolbar">
+      <div class="traffic traffic-inline" data-traffic></div>
+      <button class="tb-btn sidebar-show" data-action="toggleSidebar" title="Show Folders (Ctrl+Alt+S)" data-icon="sidebar"></button>
+      <div class="segmented" role="group">
+        <button class="seg-btn" data-action="viewList" title="View as List (Ctrl+1)" data-icon="list"></button>
+        <button class="seg-btn" data-action="viewGallery" title="View as Gallery (Ctrl+2)" data-icon="gallery"></button>
+      </div>
+      <div class="tb-spacer"></div>
+      <button class="tb-btn" data-action="deleteNote" title="Delete (Ctrl+Backspace)" data-icon="trash"></button>
+    </div>
+    <div id="list-header" class="list-header"></div>
+    <div id="note-list" class="note-list" tabindex="0"></div>
+  </section>
+  <div class="divider" data-divider="list"></div>
+
+  <main id="editor-pane">
+    <div class="toolbar editor-toolbar">
+      <div class="traffic traffic-inline traffic-gallery" data-traffic></div>
+      <button class="tb-btn gallery-back" data-action="galleryBack" title="Back to Gallery" data-icon="chevronLeft"></button>
+      <button class="tb-btn" data-action="newNote" title="New Note (Ctrl+N)" data-icon="compose"></button>
+      <div class="tb-gap"></div>
+      <button class="tb-btn tb-format" data-action="formatMenu" data-needs-note title="Text Styles">Aa</button>
+      <button class="tb-btn" data-action="checklist" data-needs-note title="Checklist (Ctrl+Shift+L)" data-icon="checklist"></button>
+      <button class="tb-btn" data-action="table" data-needs-note title="Table (Ctrl+Alt+T)" data-icon="table"></button>
+      <button class="tb-btn tb-menu" data-action="mediaMenu" data-needs-note title="Attachments" data-icon="photo"></button>
+      <div class="tb-spacer"></div>
+      <button class="tb-btn" data-action="shareMenu" data-needs-note title="Share and Export" data-icon="share"></button>
+      <button class="tb-btn tb-menu" data-action="lockMenu" data-needs-note-any title="Lock" data-icon="lock"></button>
+      <button class="tb-btn" data-action="moreMenu" title="More" data-icon="more"></button>
+      <div class="tb-search" id="tb-search">
+        <span class="tb-search-icon" data-icon="search"></span>
+        <input id="search-input" type="search" placeholder="Search" spellcheck="false" autocomplete="off">
+        <button class="tb-search-clear" data-action="clearSearch" data-icon="xCircle" title="Clear"></button>
+      </div>
+    </div>
+    <div id="editor-scroll" class="editor-scroll">
+      <div id="trash-banner" class="trash-banner" hidden>
+        <span>Recently deleted notes can't be edited.</span>
+        <button class="link-btn" data-action="recoverNote">Recover</button>
+      </div>
+      <div id="note-date" class="note-date"></div>
+      <div id="editor" class="editor"></div>
+      <div id="table-tools" class="table-tools" hidden></div>
+    </div>
+    <div id="locked-view" class="locked-view" hidden>
+      <div class="locked-icon" data-icon="lockLarge"></div>
+      <div class="locked-title">This note is locked.</div>
+      <div class="locked-sub">Enter the notes password to view locked notes.</div>
+      <form id="unlock-form" class="unlock-form" autocomplete="off">
+        <input id="unlock-input" type="password" placeholder="Password">
+      </form>
+      <button class="link-btn" data-action="showHint">Show Hint</button>
+      <div id="unlock-hint" class="locked-hint" hidden></div>
+    </div>
+    <div id="empty-view" class="empty-view" hidden>
+      <div class="empty-title">No Note Selected</div>
+    </div>
+  </main>
+</div>
+
+<div id="overlay-root"></div>
+
+<script src="js/bridge.js"></script>
+<script src="js/util.js"></script>
+<script src="js/icons.js"></script>
+<script src="js/ui.js"></script>
+<script src="js/convert.js"></script>
+<script src="js/editor.js"></script>
+<script src="js/sketch.js"></script>
+<script src="js/sidebar.js"></script>
+<script src="js/notelist.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

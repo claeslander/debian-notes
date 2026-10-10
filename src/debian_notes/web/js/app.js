@@ -1,0 +1,984 @@
+// Application controller: state, navigation, toolbar actions, menus, locking, settings.
+(function (N) {
+  const S = (N.state = {
+    folders: [],
+    notes: new Map(),
+    settings: {},
+    defaultFolderId: null,
+    scope: { type: 'all' },
+    currentNoteId: null,
+    view: 'list',
+    galleryOpen: false,
+    search: '',
+    searchIds: null,
+    systemTheme: 'light',
+    lock: { configured: false, unlocked: false, hint: '' },
+    version: '',
+  });
+  const A = (N.app = {});
+  const body = document.body;
+
+  // ------------------------------------------------------------- settings
+
+  A.setSetting = function (key, value) {
+    S.settings[key] = value;
+    N.send('setSetting', key, value);
+  };
+
+  function resolvedTheme() {
+    const a = S.settings.appearance || 'system';
+    return a === 'system' ? S.systemTheme : a;
+  }
+
+  function applyTheme() {
+    const t = resolvedTheme();
+    document.documentElement.dataset.theme = t;
+    N.send('setTheme', t);
+  }
+
+  function applyTextSize() {
+    document.documentElement.style.setProperty('--editor-size', (S.settings.textSize || 15) + 'px');
+  }
+
+  function applyLayout() {
+    const app = document.getElementById('app');
+    app.style.setProperty('--sidebar-w', (S.settings.sidebarWidth || 220) + 'px');
+    app.style.setProperty('--list-w', (S.settings.listWidth || 300) + 'px');
+    body.classList.toggle('sidebar-hidden', S.settings.sidebarVisible === false);
+    body.classList.toggle('view-gallery', S.view === 'gallery');
+    body.classList.toggle('gallery-open', S.view === 'gallery' && S.galleryOpen);
+    N.$('[data-action="viewList"]').classList.toggle('active', S.view === 'list');
+    N.$('[data-action="viewGallery"]').classList.toggle('active', S.view === 'gallery');
+    updateDragRegionsSoon();
+  }
+
+  N.onSystemTheme = (t) => { S.systemTheme = t; applyTheme(); };
+  N.onWindowActive = (active) => body.classList.toggle('window-inactive', !active);
+  N.onWindowState = (st) => { body.classList.toggle('maximized', !!st.maximized); updateDragRegionsSoon(); };
+
+  // ------------------------------------------------------------ rendering
+
+  A.refresh = function () {
+    N.sidebar.render();
+    N.notelist.render();
+    updateToolbar();
+  };
+
+  function currentNote() {
+    return S.currentNoteId != null ? S.notes.get(S.currentNoteId) : null;
+  }
+
+  function updateToolbar() {
+    const n = currentNote();
+    const editable = !!n && !n.deletedAt && N.editor.isMounted() && !N.editor.isReadOnly();
+    N.$$('[data-needs-note]').forEach((b) => { b.disabled = !editable; });
+    N.$$('[data-needs-note-any]').forEach((b) => { b.disabled = !n || !!n.deletedAt; });
+    N.$('[data-action="deleteNote"]').disabled = !n;
+    const lockBtn = N.$('[data-action="lockMenu"]');
+    const icon = n && n.locked ? (S.lock.unlocked ? 'lockOpen' : 'lock') : 'lock';
+    lockBtn.dataset.icon = icon;
+    lockBtn.classList.toggle('is-locked', !!(n && n.locked));
+    N.renderIcons(lockBtn.parentElement);
+  }
+
+  function showView(which) {
+    document.getElementById('editor-scroll').hidden = which !== 'editor';
+    document.getElementById('locked-view').hidden = which !== 'locked';
+    document.getElementById('empty-view').hidden = which !== 'empty';
+  }
+
+  // ----------------------------------------------------------- navigation
+
+  A.setScope = async function (scope, opts = {}) {
+    if (S.search) clearSearch(false);
+    S.scope = scope;
+    A.setSetting('lastScope', N.sidebar.scopeKey(scope));
+    if (S.view === 'gallery' && S.galleryOpen) { S.galleryOpen = false; applyLayout(); }
+    N.sidebar.render();
+    N.notelist.render();
+    if (opts.keepNote && N.notelist.order.includes(S.currentNoteId)) return;
+    const first = N.notelist.order[0];
+    await A.selectNote(first ?? null);
+  };
+
+  async function leaveCurrent() {
+    const prevId = N.editor.noteId();
+    if (prevId == null) return;
+    const prev = S.notes.get(prevId);
+    const discard = prev && !prev.deletedAt && !prev.locked && N.editor.isEmpty();
+    if (discard) {
+      N.editor.unmount();
+      S.notes.delete(prevId);
+      await N.call('deleteNote', prevId, true);
+      N.sidebar.render();
+      N.notelist.render();
+    } else {
+      await N.editor.flush();
+    }
+  }
+
+  A.selectNote = async function (id, opts = {}) {
+    if (id === S.currentNoteId && !opts.force && N.editor.noteId() === id) {
+      if (opts.focus) N.editor.focus();
+      return;
+    }
+    await leaveCurrent();
+    S.currentNoteId = id;
+    N.notelist.updateSelection();
+    A.setSetting('lastNote', id);
+    await openNote(id, opts);
+  };
+
+  async function openNote(id, opts = {}) {
+    const n = id != null ? S.notes.get(id) : null;
+    document.getElementById('trash-banner').hidden = true;
+    if (!n) {
+      N.editor.unmount();
+      showView('empty');
+      updateToolbar();
+      return;
+    }
+    document.getElementById('note-date').textContent = N.date.long(n.updatedAt);
+    if (n.locked && !S.lock.unlocked) {
+      N.editor.unmount();
+      showLockedView();
+      updateToolbar();
+      return;
+    }
+    let content = '';
+    try {
+      content = (await N.call('getNote', id)).body;
+    } catch (err) {
+      if (err.message === 'locked') {
+        S.lock.unlocked = false;
+        N.editor.unmount();
+        showLockedView();
+        updateToolbar();
+        return;
+      }
+      throw err;
+    }
+    if (S.currentNoteId !== id) return;
+    N.editor.mount(n, content, { readOnly: !!n.deletedAt, focus: opts.focus, caret: opts.caret });
+    document.getElementById('trash-banner').hidden = !n.deletedAt;
+    showView('editor');
+    document.getElementById('editor-scroll').scrollTop = 0;
+    if (S.search) N.editor.refreshHighlights(true);
+    updateToolbar();
+  }
+
+  A.noteSaved = function (meta) {
+    const old = S.notes.get(meta.id);
+    S.notes.set(meta.id, meta);
+    if (meta.id === S.currentNoteId) document.getElementById('note-date').textContent = N.date.long(meta.updatedAt);
+    N.notelist.render();
+    N.notelist.updateSelection();
+    if (!old || old.tags.join() !== meta.tags.join()) N.sidebar.render();
+  };
+
+  // ---------------------------------------------------------------- notes
+
+  A.newNote = async function () {
+    if (S.search) clearSearch(false);
+    let folderId = S.scope.type === 'folder' ? S.scope.id : S.defaultFolderId;
+    let initial = '';
+    if (S.scope.type === 'trash') await A.setScope({ type: 'folder', id: folderId });
+    if (S.scope.type === 'tag') initial = N.editor.initialHtml() + `<div>#${N.esc(S.scope.tag)}</div>`;
+    await leaveCurrent();
+    const meta = await N.call('createNote', folderId, initial);
+    S.notes.set(meta.id, meta);
+    if (S.view === 'gallery') S.galleryOpen = true;
+    applyLayout();
+    N.sidebar.render();
+    N.notelist.render();
+    await A.selectNote(meta.id, { focus: true, caret: 'start', force: true });
+  };
+
+  function neighbourOf(id) {
+    const order = N.notelist.order;
+    const i = order.indexOf(id);
+    if (i === -1) return order[0] ?? null;
+    return order[i + 1] ?? order[i - 1] ?? null;
+  }
+
+  A.deleteNote = async function (id = S.currentNoteId) {
+    const n = S.notes.get(id);
+    if (!n) return;
+    if (n.deletedAt) {
+      const ok = await N.ui.confirm('Are you sure you want to delete this note?',
+        "This note will be deleted immediately. You can't undo this action.", 'Delete', true);
+      if (!ok) return;
+    }
+    const next = neighbourOf(id);
+    if (N.editor.noteId() === id) {
+      await N.editor.flush();
+      N.editor.unmount();
+    }
+    if (n.deletedAt) {
+      await N.call('deleteNote', id, true);
+      S.notes.delete(id);
+    } else {
+      S.notes.set(id, await N.call('deleteNote', id, false));
+    }
+    if (S.currentNoteId === id) S.currentNoteId = null;
+    A.refresh();
+    if (S.view === 'gallery' && S.galleryOpen) { S.galleryOpen = false; applyLayout(); }
+    await A.selectNote(N.notelist.order.includes(next) ? next : N.notelist.order[0] ?? null, { force: true });
+  };
+
+  A.recoverNote = async function (id = S.currentNoteId) {
+    const n = S.notes.get(id);
+    if (!n || !n.deletedAt) return;
+    const next = neighbourOf(id);
+    S.notes.set(id, await N.call('recoverNote', id));
+    A.refresh();
+    if (S.scope.type === 'trash') await A.selectNote(N.notelist.order.includes(next) ? next : N.notelist.order[0] ?? null, { force: true });
+    else await openNote(id);
+    N.ui.toast('Note recovered');
+  };
+
+  A.moveNote = async function (id, folderId) {
+    const n = S.notes.get(id);
+    if (!n || (n.folderId === folderId && !n.deletedAt)) return;
+    if (N.editor.noteId() === id) await N.editor.flush();
+    const next = neighbourOf(id);
+    S.notes.set(id, await N.call('moveNote', id, folderId));
+    A.refresh();
+    if (id === S.currentNoteId && !N.notelist.order.includes(id)) {
+      await A.selectNote(N.notelist.order.includes(next) ? next : N.notelist.order[0] ?? null);
+    } else if (id === S.currentNoteId) {
+      await openNote(id);
+    }
+    const f = S.folders.find((x) => x.id === folderId);
+    N.ui.toast(`Moved to “${f ? f.name : 'Notes'}”`);
+  };
+
+  A.togglePin = async function (id = S.currentNoteId) {
+    const n = S.notes.get(id);
+    if (!n || n.deletedAt) return;
+    S.notes.set(id, await N.call('setPinned', id, !n.pinned));
+    N.notelist.render();
+  };
+
+  A.duplicateNote = async function (id = S.currentNoteId) {
+    if (N.editor.noteId() === id) await N.editor.flush();
+    const meta = await N.call('duplicateNote', id);
+    S.notes.set(meta.id, meta);
+    A.refresh();
+    await A.selectNote(meta.id);
+  };
+
+  A.emptyTrash = async function () {
+    const ok = await N.ui.confirm('Permanently delete all notes in Recently Deleted?',
+      "You can't undo this action.", 'Delete All', true);
+    if (!ok) return;
+    if (currentNote() && currentNote().deletedAt) N.editor.unmount();
+    await N.call('emptyTrash');
+    for (const [id, n] of S.notes) if (n.deletedAt) S.notes.delete(id);
+    if (S.scope.type === 'trash') await A.setScope({ type: 'all' });
+    else A.refresh();
+  };
+
+  A.noteMenuItems = function (id) {
+    const n = S.notes.get(id);
+    if (!n) return [];
+    if (n.deletedAt) {
+      return [
+        { label: 'Recover', action: () => A.recoverNote(id) },
+        { label: 'Move to', submenu: folderMenu((f) => A.moveNote(id, f.id)) },
+        '-',
+        { label: 'Delete Permanently…', danger: true, action: () => A.deleteNote(id) },
+      ];
+    }
+    return [
+      { label: n.pinned ? 'Unpin Note' : 'Pin Note', icon: 'pinOutline', action: () => A.togglePin(id) },
+      { label: n.locked ? 'Remove Lock' : 'Lock Note', icon: 'lock', shortcut: 'Ctrl+L', action: () => (n.locked ? removeLock(id) : lockNote(id)) },
+      '-',
+      { label: 'Move to', icon: 'folder', submenu: folderMenu((f) => A.moveNote(id, f.id), n.folderId) },
+      { label: 'Duplicate Note', action: () => A.duplicateNote(id) },
+      '-',
+      { label: 'Delete', icon: 'trash', shortcut: 'Ctrl+⌫', action: () => A.deleteNote(id) },
+    ];
+  };
+
+  function folderMenu(onPick, currentId) {
+    const out = [];
+    const walk = (parent, depth) => {
+      S.folders.filter((f) => (f.parentId ?? null) === parent)
+        .sort((a, b) => (b.isDefault - a.isDefault) || a.name.localeCompare(b.name))
+        .forEach((f) => {
+          out.push({ label: ' '.repeat(depth) + f.name, icon: 'folder', disabled: f.id === currentId, action: () => onPick(f) });
+          walk(f.id, depth + 1);
+        });
+    };
+    walk(null, 0);
+    return out;
+  }
+
+  // -------------------------------------------------------------- folders
+
+  A.newFolder = async function (parentId = null) {
+    const f = await N.call('createFolder', 'New Folder', parentId);
+    S.folders.push(f);
+    if (parentId != null) {
+      const set = new Set(S.settings.collapsedFolders || []);
+      set.delete(parentId);
+      A.setSetting('collapsedFolders', Array.from(set));
+    }
+    if (S.settings.accountCollapsed) A.setSetting('accountCollapsed', false);
+    await A.setScope({ type: 'folder', id: f.id });
+    N.sidebar.beginRename(f.id);
+  };
+
+  A.deleteFolder = async function (id) {
+    const f = S.folders.find((x) => x.id === id);
+    if (!f) return;
+    const ok = await N.ui.confirm(`Are you sure you want to delete the folder “${f.name}”?`,
+      'All notes and subfolders in this folder will be moved to Recently Deleted.', 'Delete Folder', true);
+    if (!ok) return;
+    await N.editor.flush();
+    const res = await N.call('deleteFolder', id);
+    S.folders = res.folders;
+    S.notes = new Map(res.notes.map((n) => [n.id, n]));
+    const scopeGone = S.scope.type === 'folder' && !S.folders.some((x) => x.id === S.scope.id);
+    if (scopeGone) await A.setScope({ type: 'all' });
+    else { A.refresh(); await A.selectNote(S.currentNoteId, { force: true }); }
+  };
+
+  // --------------------------------------------------------------- search
+
+  const searchInput = () => document.getElementById('search-input');
+
+  const runSearch = N.debounce(async () => {
+    const q = searchInput().value.trim();
+    S.search = q;
+    document.getElementById('tb-search').classList.toggle('has-text', !!q);
+    if (!q) { clearSearch(true); return; }
+    S.searchIds = new Set(await N.call('search', q));
+    N.sidebar.render();
+    N.notelist.render();
+    if (!N.notelist.order.includes(S.currentNoteId)) await A.selectNote(N.notelist.order[0] ?? null);
+    else N.editor.refreshHighlights(true);
+  }, 160);
+
+  function clearSearch(reselect) {
+    const had = !!S.searchIds;
+    searchInput().value = '';
+    document.getElementById('tb-search').classList.remove('has-text');
+    S.search = '';
+    S.searchIds = null;
+    N.editor.refreshHighlights(false);
+    if (reselect && had) A.setScope(S.scope, { keepNote: true });
+  }
+
+  // ------------------------------------------------------------- locking
+
+  function showLockedView() {
+    showView('locked');
+    document.getElementById('unlock-hint').hidden = true;
+    const input = document.getElementById('unlock-input');
+    input.value = '';
+    setTimeout(() => input.focus(), 30);
+  }
+
+  async function createPassword() {
+    const r = await N.ui.sheet({
+      icon: 'lockLarge',
+      title: 'Create a password for locked notes',
+      message: "Locked notes are encrypted with this password. If you forget it, you can't view your locked notes.",
+      fields: [
+        { name: 'pw', type: 'password', placeholder: 'Password' },
+        { name: 'verify', type: 'password', placeholder: 'Verify' },
+        { name: 'hint', placeholder: 'Hint (recommended)' },
+      ],
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Set Password', value: 'ok', primary: true }],
+      validate: (_b, v) => (!v.pw ? 'Enter a password.' : v.pw !== v.verify ? "The passwords don't match." : null),
+    });
+    if (r.button !== 'ok') return false;
+    await N.call('setLockPassword', r.values.pw, r.values.hint);
+    S.lock = { configured: true, unlocked: true, hint: r.values.hint };
+    return true;
+  }
+
+  async function askPassword() {
+    const r = await N.ui.sheet({
+      icon: 'lockLarge',
+      title: 'Enter the notes password',
+      message: S.lock.hint ? `Hint: ${S.lock.hint}` : '',
+      fields: [{ name: 'pw', type: 'password', placeholder: 'Password' }],
+      buttons: [{ label: 'Cancel', value: null }, { label: 'OK', value: 'ok', primary: true }],
+      validate: async (_b, v) => ((await N.call('unlock', v.pw)) ? null : 'Wrong password. Try again.'),
+    });
+    if (r.button !== 'ok') return false;
+    S.lock.unlocked = true;
+    return true;
+  }
+
+  async function ensureUnlocked() {
+    if (!S.lock.configured) return createPassword();
+    if (S.lock.unlocked) return true;
+    return askPassword();
+  }
+
+  async function lockNote(id = S.currentNoteId) {
+    const n = S.notes.get(id);
+    if (!n || n.locked || n.deletedAt) return;
+    if (!(await ensureUnlocked())) return;
+    if (N.editor.noteId() !== id) await A.selectNote(id);
+    await N.editor.flush();
+    const meta = await N.call('lockNote', id, N.editor.serialize());
+    S.notes.set(id, meta);
+    A.refresh();
+    N.notelist.updateSelection();
+    N.ui.toast('Note locked');
+  }
+
+  async function removeLock(id = S.currentNoteId) {
+    const n = S.notes.get(id);
+    if (!n || !n.locked) return;
+    if (!(await ensureUnlocked())) return;
+    await N.editor.flush();
+    const res = await N.call('removeLock', id);
+    S.notes.set(id, res.meta);
+    if (N.editor.noteId() !== id) await A.selectNote(id, { force: true });
+    else await openNote(id);
+    const meta = await N.call('saveNote', id, N.editor.serialize());
+    A.noteSaved(meta);
+    updateToolbar();
+    N.ui.toast('Lock removed');
+  }
+
+  async function closeLockedNotes() {
+    await N.editor.flush();
+    await N.call('closeLockedNotes');
+    S.lock.unlocked = false;
+    const n = currentNote();
+    if (n && n.locked) await openNote(n.id);
+    updateToolbar();
+  }
+
+  async function changePassword() {
+    const r = await N.ui.sheet({
+      icon: 'lockLarge',
+      title: 'Change Password',
+      fields: [
+        { name: 'old', type: 'password', placeholder: 'Old password' },
+        { name: 'pw', type: 'password', placeholder: 'New password' },
+        { name: 'verify', type: 'password', placeholder: 'Verify' },
+        { name: 'hint', placeholder: 'Hint (recommended)' },
+      ],
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Change Password', value: 'ok', primary: true }],
+      validate: async (_b, v) => {
+        if (!v.pw) return 'Enter a new password.';
+        if (v.pw !== v.verify) return "The passwords don't match.";
+        return (await N.call('changeLockPassword', v.old, v.pw, v.hint)) ? null : 'The old password is incorrect.';
+      },
+    });
+    if (r.button === 'ok') {
+      S.lock.hint = r.values.hint;
+      S.lock.unlocked = true;
+      N.ui.toast('Password changed');
+    }
+  }
+
+  // -------------------------------------------------------- toolbar menus
+
+  function formatPopover(anchor) {
+    const st = N.editor.state();
+    const content = N.el(`
+      <div class="fmt">
+        <div class="fmt-title">Format</div>
+        <div class="fmt-styles">
+          <button data-style="title" class="fs-title">Title</button>
+          <button data-style="heading" class="fs-heading">Heading</button>
+          <button data-style="subheading" class="fs-subheading">Subheading</button>
+          <button data-style="body" class="fs-body">Body</button>
+          <button data-style="mono" class="fs-mono">Monostyled</button>
+        </div>
+        <div class="fmt-group fmt-inline">
+          <button data-inline="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+          <button data-inline="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+          <button data-inline="underline" title="Underline (Ctrl+U)"><u>U</u></button>
+          <button data-inline="strike" title="Strikethrough"><s>S</s></button>
+        </div>
+        <div class="fmt-row">
+          <div class="fmt-group">
+            <button data-list="bullet" title="Bulleted List (Ctrl+Shift+7)">${N.icon('bulleted')}</button>
+            <button data-list="dashed" title="Dashed List (Ctrl+Shift+8)">${N.icon('dashed')}</button>
+            <button data-list="numbered" title="Numbered List (Ctrl+Shift+9)">${N.icon('numbered')}</button>
+          </div>
+          <div class="fmt-group">
+            <button data-cmd="outdent" title="Decrease Indent (Ctrl+[)">${N.icon('outdent')}</button>
+            <button data-cmd="indent" title="Increase Indent (Ctrl+])">${N.icon('indent')}</button>
+          </div>
+          <div class="fmt-group">
+            <button data-cmd="quote" title="Block Quote (Ctrl+')">${N.icon('quote')}</button>
+          </div>
+        </div>
+        <div class="fmt-colors">
+          <button data-color="" class="fc-none" title="Default colour"></button>
+          <button data-color="#af52de" style="--c:#af52de" title="Purple"></button>
+          <button data-color="#ff2d55" style="--c:#ff2d55" title="Pink"></button>
+          <button data-color="#ff9500" style="--c:#ff9500" title="Orange"></button>
+          <button data-color="#00c7be" style="--c:#00c7be" title="Mint"></button>
+          <button data-color="#0a84ff" style="--c:#0a84ff" title="Blue"></button>
+        </div>
+      </div>`);
+    const sync = () => {
+      const s = N.editor.state();
+      N.$$('[data-style]', content).forEach((b) => b.classList.toggle('active', b.dataset.style === s.style));
+      N.$$('[data-inline]', content).forEach((b) => b.classList.toggle('active', !!s[b.dataset.inline]));
+      N.$$('[data-list]', content).forEach((b) => b.classList.toggle('active', b.dataset.list === s.list));
+      N.$('[data-cmd="quote"]', content).classList.toggle('active', s.quote);
+    };
+    content.addEventListener('mousedown', (e) => e.preventDefault());
+    content.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      if (b.dataset.style) N.editor.setStyle(b.dataset.style);
+      else if (b.dataset.inline) N.editor.toggleInline(b.dataset.inline);
+      else if (b.dataset.list) N.editor.toggleList(b.dataset.list);
+      else if (b.dataset.cmd === 'indent') N.editor.indent();
+      else if (b.dataset.cmd === 'outdent') N.editor.outdent();
+      else if (b.dataset.cmd === 'quote') N.editor.toggleQuote();
+      else if (b.dataset.color !== undefined) N.editor.setColor(b.dataset.color);
+      sync();
+    });
+    N.ui.popover(anchor, content, { className: 'format-popover' });
+    void st;
+    sync();
+  }
+
+  function pickFiles(accept, cb) {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    if (accept) input.accept = accept;
+    input.addEventListener('change', () => cb(Array.from(input.files)));
+    input.click();
+  }
+
+  function mediaMenu(anchor) {
+    const range = N.editor.saveRange();
+    N.ui.menuFor(anchor, [
+      { label: 'Photos…', icon: 'photo', action: () => pickFiles('image/*', (f) => N.editor.insertFiles(f, range)) },
+      { label: 'Attach File…', icon: 'paperclip', action: () => pickFiles('', (f) => N.editor.insertFiles(f, range)) },
+      '-',
+      { label: 'Sketch', icon: 'pen', action: () => N.sketch() },
+    ]);
+  }
+
+  function lockMenu(anchor) {
+    const n = currentNote();
+    if (!n) return;
+    const items = [];
+    if (!n.locked) items.push({ label: 'Lock Note', shortcut: 'Ctrl+L', action: () => lockNote() });
+    else items.push({ label: 'Remove Lock', action: () => removeLock() });
+    if (S.lock.unlocked) items.push({ label: 'Close All Locked Notes', action: () => closeLockedNotes() });
+    if (S.lock.configured) items.push('-', { label: 'Change Password…', action: () => changePassword() });
+    N.ui.menuFor(anchor, items);
+  }
+
+  function shareMenu(anchor) {
+    N.ui.menuFor(anchor, [
+      { label: 'Export as PDF…', icon: 'file', action: () => exportNote('pdf') },
+      { label: 'Export as HTML…', action: () => exportNote('html') },
+      { label: 'Export as Markdown…', action: () => exportNote('markdown') },
+      { label: 'Export as Plain Text…', action: () => exportNote('text') },
+      '-',
+      { label: 'Copy Note Text', action: () => copyText(N.editor.contentText()) },
+      { label: 'Copy as Markdown', action: () => copyText(N.convert.toMarkdown(N.editor.root())) },
+      '-',
+      { label: 'Print…', shortcut: 'Ctrl+P', action: () => N.send('print') },
+    ]);
+  }
+
+  function moreMenu(anchor) {
+    const sortBy = S.settings.sortBy || 'updated';
+    const setSort = (v) => { A.setSetting('sortBy', v); N.notelist.render(); };
+    N.ui.menuFor(anchor, [
+      { label: 'New Folder', shortcut: 'Ctrl+Shift+N', action: () => A.newFolder() },
+      { label: 'Import to Notes…', action: () => importNotes() },
+      '-',
+      { label: 'View as List', checked: S.view === 'list', shortcut: 'Ctrl+1', action: () => setView('list') },
+      { label: 'View as Gallery', checked: S.view === 'gallery', shortcut: 'Ctrl+2', action: () => setView('gallery') },
+      {
+        label: 'Sort By', submenu: [
+          { label: 'Date Edited', checked: sortBy === 'updated', action: () => setSort('updated') },
+          { label: 'Date Created', checked: sortBy === 'created', action: () => setSort('created') },
+          { label: 'Title', checked: sortBy === 'title', action: () => setSort('title') },
+        ],
+      },
+      { label: 'Group by Date', checked: S.settings.groupByDate !== false, action: () => { A.setSetting('groupByDate', S.settings.groupByDate === false); N.notelist.render(); } },
+      { label: S.settings.sidebarVisible === false ? 'Show Folders' : 'Hide Folders', shortcut: 'Ctrl+Alt+S', action: () => toggleSidebar() },
+      '-',
+      { label: 'Settings…', shortcut: 'Ctrl+,', action: () => openSettings() },
+      { label: 'Keyboard Shortcuts', action: () => showShortcuts() },
+      { label: 'About Notes', action: () => showAbout() },
+    ]);
+  }
+
+  // --------------------------------------------------------- export/import
+
+  async function exportNote(fmt) {
+    const n = currentNote();
+    if (!n || !N.editor.root()) return;
+    await N.editor.flush();
+    const root = N.editor.root();
+    const title = n.title || 'New Note';
+    let content = '';
+    if (fmt === 'html') content = N.convert.toHtmlDocument(title, root.innerHTML);
+    else if (fmt === 'markdown') content = N.convert.toMarkdown(root);
+    else if (fmt === 'text') content = root.innerText;
+    const ok = await N.call('exportNote', fmt, content, title);
+    if (ok && fmt !== 'pdf') N.ui.toast('Note exported');
+  }
+
+  function copyText(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    ta.remove();
+    N.ui.toast('Copied');
+  }
+
+  async function importNotes() {
+    const files = await N.call('importFiles');
+    if (!files.length) return;
+    const folderId = S.scope.type === 'folder' ? S.scope.id : S.defaultFolderId;
+    const scratch = document.createElement('div');
+    scratch.className = 'editor import-scratch';
+    document.body.appendChild(scratch);
+    let last = null;
+    for (const f of files) {
+      let html;
+      if (f.ext === 'md' || f.ext === 'markdown') html = N.convert.markdownToHtml(f.text);
+      else if (f.ext === 'html' || f.ext === 'htm') html = N.convert.sanitize(f.text);
+      else html = N.convert.textToHtml(f.text);
+      scratch.innerHTML = html;
+      const first = scratch.firstElementChild;
+      if (!first || first.tagName !== 'H1') scratch.insertAdjacentHTML('afterbegin', `<h1>${N.esc(f.name)}</h1>`);
+      last = await N.call('importNote', folderId, N.editor.serialize(scratch));
+      S.notes.set(last.id, last);
+    }
+    scratch.remove();
+    A.refresh();
+    if (last) await A.selectNote(last.id);
+    N.ui.toast(`Imported ${files.length} ${files.length === 1 ? 'note' : 'notes'}`);
+  }
+
+  // -------------------------------------------------------------- sheets
+
+  function openSettings() {
+    const sel = (name, options, value) => `<select name="${name}">` +
+      options.map(([v, l]) => `<option value="${v}"${String(v) === String(value) ? ' selected' : ''}>${l}</option>`).join('') + '</select>';
+    const check = (name, label, value) =>
+      `<label class="pref-check"><input type="checkbox" name="${name}"${value ? ' checked' : ''}><span>${label}</span></label>`;
+    const html = `
+      <div class="prefs">
+        <div class="pref-row"><span>Appearance:</span>${sel('appearance', [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']], S.settings.appearance || 'system')}</div>
+        <div class="pref-row"><span>Default text size:</span>${sel('textSize', [12, 13, 14, 15, 16, 17, 18, 20, 22].map((s) => [s, s + ' pt']), S.settings.textSize || 15)}</div>
+        <div class="pref-row"><span>New notes start with:</span>${sel('newNoteStyle', [['title', 'Title'], ['heading', 'Heading'], ['subheading', 'Subheading'], ['body', 'Body']], S.settings.newNoteStyle || 'title')}</div>
+        <div class="pref-row"><span>Sort notes by:</span>${sel('sortBy', [['updated', 'Date Edited'], ['created', 'Date Created'], ['title', 'Title']], S.settings.sortBy || 'updated')}</div>
+        <div class="pref-row"><span></span><div class="pref-checks">
+          ${check('groupByDate', 'Group notes by date', S.settings.groupByDate !== false)}
+          ${check('sortChecked', 'Sort checked items to the bottom', !!S.settings.sortChecked)}
+          ${check('showCounts', 'Show note counts', S.settings.showCounts !== false)}
+        </div></div>
+        <div class="pref-row"><span>Locked notes:</span><div>
+          ${S.lock.configured ? '<button class="push-btn" data-pref="changePassword">Change Password…</button>' : '<span class="pref-muted">No password set yet</span>'}
+        </div></div>
+      </div>`;
+    N.ui.sheet({
+      title: 'Settings', icon: false, html, wide: true,
+      buttons: [{ label: 'Done', value: 'ok', primary: true }],
+      onOpen(sheet) {
+        sheet.addEventListener('change', (e) => {
+          const t = e.target;
+          const v = t.type === 'checkbox' ? t.checked : t.name === 'textSize' ? +t.value : t.value;
+          A.setSetting(t.name, v);
+          if (t.name === 'appearance') applyTheme();
+          if (t.name === 'textSize') applyTextSize();
+          if (['sortBy', 'groupByDate'].includes(t.name)) N.notelist.render();
+          if (t.name === 'showCounts') N.sidebar.render();
+        });
+        sheet.addEventListener('click', (e) => {
+          if (e.target.closest('[data-pref="changePassword"]')) {
+            sheet.closest('.sheet-backdrop').remove();
+            changePassword();
+          }
+        });
+      },
+    });
+  }
+
+  function showShortcuts() {
+    const rows = [
+      ['New note', 'Ctrl+N'], ['New folder', 'Ctrl+Shift+N'], ['Search', 'Ctrl+F'], ['Delete note', 'Ctrl+Backspace'],
+      ['Lock note', 'Ctrl+L'], ['Print', 'Ctrl+P'], ['Title', 'Ctrl+Shift+T'], ['Heading', 'Ctrl+Shift+H'],
+      ['Subheading', 'Ctrl+Shift+J'], ['Body', 'Ctrl+Shift+B'], ['Monostyled', 'Ctrl+Shift+M'],
+      ['Checklist', 'Ctrl+Shift+L'], ['Mark as checked', 'Ctrl+Shift+U'], ['Bulleted list', 'Ctrl+Shift+7'],
+      ['Dashed list', 'Ctrl+Shift+8'], ['Numbered list', 'Ctrl+Shift+9'], ['Block quote', "Ctrl+'"],
+      ['Table', 'Ctrl+Alt+T'], ['Indent / outdent', 'Ctrl+] / Ctrl+['], ['Bold / italic / underline', 'Ctrl+B / I / U'],
+      ['Paste and match style', 'Ctrl+Shift+V'], ['List / gallery view', 'Ctrl+1 / Ctrl+2'], ['Show or hide folders', 'Ctrl+Alt+S'],
+      ['Bigger / smaller text', 'Ctrl+= / Ctrl+-'],
+    ];
+    N.ui.sheet({
+      title: 'Keyboard Shortcuts', icon: false, wide: true,
+      html: '<table class="shortcuts">' + rows.map(([a, k]) => `<tr><td>${a}</td><td><kbd>${k}</kbd></td></tr>`).join('') + '</table>',
+      buttons: [{ label: 'Done', value: 'ok', primary: true }],
+    });
+  }
+
+  function showAbout() {
+    N.ui.sheet({
+      title: 'Notes',
+      message: `Version ${S.version}\nA fast, private notes app for Debian. Your notes are stored on this computer only.`,
+      buttons: [{ label: 'OK', value: 'ok', primary: true }],
+    });
+  }
+
+  // ---------------------------------------------------------- view modes
+
+  function setView(view) {
+    S.view = view;
+    S.galleryOpen = false;
+    A.setSetting('view', view);
+    applyLayout();
+    N.notelist.render();
+    N.notelist.updateSelection();
+  }
+
+  A.openGalleryNote = async function (id) {
+    await A.selectNote(id);
+    S.galleryOpen = true;
+    applyLayout();
+  };
+
+  async function galleryBack() {
+    await leaveCurrent();
+    S.galleryOpen = false;
+    applyLayout();
+    N.notelist.render();
+    N.notelist.updateSelection();
+    document.getElementById('note-list').focus();
+  }
+
+  function toggleSidebar() {
+    A.setSetting('sidebarVisible', S.settings.sidebarVisible === false);
+    applyLayout();
+  }
+
+  // ---------------------------------------------------------- dividers
+
+  function initDividers() {
+    N.$$('[data-divider]').forEach((d) => {
+      d.addEventListener('mousedown', (e) => {
+        e.preventDefault();
+        const which = d.dataset.divider;
+        const key = which === 'sidebar' ? 'sidebarWidth' : 'listWidth';
+        const start = S.settings[key] || (which === 'sidebar' ? 220 : 300);
+        const x0 = e.clientX;
+        const [min, max] = which === 'sidebar' ? [160, 360] : [220, 520];
+        body.classList.add('resizing');
+        let w = start;
+        const move = (ev) => {
+          w = N.clamp(start + ev.clientX - x0, min, max);
+          document.getElementById('app').style.setProperty(which === 'sidebar' ? '--sidebar-w' : '--list-w', w + 'px');
+        };
+        const up = () => {
+          document.removeEventListener('mousemove', move);
+          document.removeEventListener('mouseup', up);
+          body.classList.remove('resizing');
+          A.setSetting(key, w);
+          updateDragRegionsSoon();
+        };
+        document.addEventListener('mousemove', move);
+        document.addEventListener('mouseup', up);
+      });
+    });
+  }
+
+  // --------------------------------------------------- window drag regions
+
+  function updateDragRegions() {
+    const overlayOpen = document.querySelector('#overlay-root .sheet-backdrop, #overlay-root .menu, #overlay-root .popover');
+    const rect = (el) => { const r = el.getBoundingClientRect(); return [r.left, r.top, r.width, r.height]; };
+    const visible = (el) => el.offsetParent !== null && el.getBoundingClientRect().width > 0;
+    const areas = overlayOpen ? [] : N.$$('.toolbar').filter(visible).map(rect);
+    const exclude = N.$$('.toolbar button, .toolbar input, .tb-search, .segmented, .traffic').filter(visible).map(rect);
+    N.send('setDragRegions', { areas, exclude });
+  }
+  const updateDragRegionsSoon = N.debounce(updateDragRegions, 60);
+
+  // ----------------------------------------------------------- shortcuts
+
+  function onGlobalKey(e) {
+    if (document.querySelector('#overlay-root .sheet-backdrop')) return;
+    const mod = N.isMod(e);
+    const ed = N.editor.root();
+    const inEditor = ed && ed.contains(e.target);
+    const inInput = e.target.matches && e.target.matches('input, textarea, select');
+    const k = e.key.length === 1 ? e.key.toLowerCase() : e.key;
+    let handled = true;
+
+    if (e.key === 'Escape' && e.target === searchInput()) { clearSearch(true); searchInput().blur(); }
+    else if (mod && e.altKey && k === 't') N.editor.insertTable();
+    else if (mod && e.altKey && k === 's') toggleSidebar();
+    else if (mod && e.altKey && k === 'f') searchInput().focus();
+    else if (mod && e.shiftKey && !e.altKey) {
+      if (k === 'n') A.newFolder();
+      else if (k === 't') N.editor.setStyle('title');
+      else if (k === 'h') N.editor.setStyle('heading');
+      else if (k === 'j') N.editor.setStyle('subheading');
+      else if (k === 'b') N.editor.setStyle('body');
+      else if (k === 'm') N.editor.setStyle('mono');
+      else if (k === 'l') N.editor.toggleList('checklist');
+      else if (k === 'u') N.editor.toggleCheckedAtCaret();
+      else if (e.code === 'Digit7') N.editor.toggleList('bullet');
+      else if (e.code === 'Digit8') N.editor.toggleList('dashed');
+      else if (e.code === 'Digit9') N.editor.toggleList('numbered');
+      else handled = false;
+    } else if (mod && !e.altKey) {
+      if (k === 'n') A.newNote();
+      else if (k === 'f') { searchInput().focus(); searchInput().select(); }
+      else if (k === 'p') N.send('print');
+      else if (k === ',') openSettings();
+      else if (k === 'l') { const n = currentNote(); if (n) (n.locked ? removeLock() : lockNote()); }
+      else if (e.code === 'Digit1') setView('list');
+      else if (e.code === 'Digit2') setView('gallery');
+      else if (e.code === 'BracketRight') N.editor.indent();
+      else if (e.code === 'BracketLeft') N.editor.outdent();
+      else if (e.code === 'Quote' || k === "'") N.editor.toggleQuote();
+      else if (k === '=' || k === '+') setTextSize(1);
+      else if (k === '-') setTextSize(-1);
+      else if (k === '0') { A.setSetting('textSize', 15); applyTextSize(); }
+      else if ((e.key === 'Backspace' || e.key === 'Delete') && !inEditor && !inInput) A.deleteNote();
+      else handled = false;
+    } else handled = false;
+
+    if (handled) { e.preventDefault(); e.stopPropagation(); }
+  }
+
+  function setTextSize(delta) {
+    A.setSetting('textSize', N.clamp((S.settings.textSize || 15) + delta, 10, 32));
+    applyTextSize();
+  }
+
+  // -------------------------------------------------------------- actions
+
+  const ACTIONS = {
+    toggleSidebar,
+    newFolder: () => A.newFolder(),
+    newNote: () => A.newNote(),
+    deleteNote: () => A.deleteNote(),
+    recoverNote: () => A.recoverNote(),
+    viewList: () => setView('list'),
+    viewGallery: () => setView('gallery'),
+    galleryBack,
+    formatMenu: (b) => formatPopover(b),
+    checklist: () => N.editor.toggleList('checklist'),
+    table: () => N.editor.insertTable(),
+    mediaMenu: (b) => mediaMenu(b),
+    shareMenu: (b) => shareMenu(b),
+    lockMenu: (b) => lockMenu(b),
+    moreMenu: (b) => moreMenu(b),
+    clearSearch: () => { clearSearch(true); searchInput().focus(); },
+    showHint: () => {
+      const h = document.getElementById('unlock-hint');
+      h.textContent = S.lock.hint ? `Hint: ${S.lock.hint}` : 'No hint was set.';
+      h.hidden = false;
+    },
+  };
+
+  function initActions() {
+    // Toolbar buttons keep the editor selection intact.
+    document.addEventListener('mousedown', (e) => {
+      const b = e.target.closest('.toolbar button, .table-tools button');
+      if (b) e.preventDefault();
+    });
+    document.addEventListener('click', (e) => {
+      const b = e.target.closest('[data-action]');
+      if (!b || b.disabled) return;
+      const fn = ACTIONS[b.dataset.action];
+      if (!fn) return;
+      if (b.classList.contains('pressed') && N.ui.popoverOpen()) { N.ui.closePopover(); return; }
+      fn(b);
+    });
+    document.addEventListener('contextmenu', (e) => {
+      const ed = N.editor.root();
+      if (ed && ed.contains(e.target)) return; // native menu with spelling suggestions
+      if (e.target.matches('input, textarea')) return;
+      e.preventDefault();
+    });
+    searchInput().addEventListener('input', runSearch);
+    document.getElementById('unlock-form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const input = document.getElementById('unlock-input');
+      if (await N.call('unlock', input.value)) {
+        S.lock.unlocked = true;
+        await openNote(S.currentNoteId);
+      } else {
+        input.value = '';
+        const form = e.target;
+        form.classList.remove('shake');
+        void form.offsetWidth;
+        form.classList.add('shake');
+      }
+    });
+  }
+
+  // ----------------------------------------------------------------- boot
+
+  N.beforeQuit = async function () {
+    try { await leaveCurrent(); } catch (_) { /* quitting anyway */ }
+    N.send('quitReady');
+  };
+
+  async function boot() {
+    const data = await N.call('bootstrap');
+    S.version = data.version;
+    S.folders = data.folders;
+    S.notes = new Map(data.notes.map((n) => [n.id, n]));
+    S.settings = data.settings || {};
+    S.defaultFolderId = data.defaultFolderId;
+    S.systemTheme = data.systemTheme;
+    S.lock = { configured: data.lockConfigured, unlocked: false, hint: data.lockHint };
+    S.view = S.settings.view === 'gallery' ? 'gallery' : 'list';
+    N.onWindowActive(data.windowActive);
+    body.classList.toggle('rounded', !!data.rounded);
+    body.classList.toggle('maximized', !!data.maximized);
+
+    applyTheme();
+    applyTextSize();
+    N.ui.renderTrafficLights();
+    N.renderIcons();
+    N.editor.init();
+    N.sidebar.init();
+    N.notelist.init();
+    initActions();
+    initDividers();
+    applyLayout();
+    document.addEventListener('keydown', onGlobalKey);
+    window.addEventListener('resize', updateDragRegionsSoon);
+    new MutationObserver(updateDragRegionsSoon).observe(document.getElementById('overlay-root'), { childList: true });
+
+    let scope = N.sidebar.parseScope(S.settings.lastScope || 'all');
+    if (scope.type === 'folder' && !S.folders.some((f) => f.id === scope.id)) scope = { type: 'all' };
+    S.scope = scope;
+    N.sidebar.render();
+    N.notelist.render();
+    const last = S.settings.lastNote;
+    const start = N.notelist.order.includes(last) ? last : N.notelist.order[0] ?? null;
+    await A.selectNote(start, { force: true });
+    document.getElementById('note-list').focus({ preventScroll: true });
+    body.classList.add('ready');
+    updateDragRegions();
+  }
+
+  boot().catch((err) => N.send('log', 'boot failed', String(err && err.stack || err)));
+})(window.N = window.N || {});

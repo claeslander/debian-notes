@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- macOS-style icon grid: 824px rounded square centred on a 1024 canvas, with drop shadow. -->
+    <clipPath id="tile">
+      <rect x="100" y="100" width="824" height="824" rx="185"/>
+    </clipPath>
+    <linearGradient id="band" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffe066"/>
+      <stop offset="0.55" stop-color="#fdd23c"/>
+      <stop offset="1" stop-color="#f7bd17"/>
+    </linearGradient>
+    <linearGradient id="paper" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#f1f1f3"/>
+    </linearGradient>
+    <linearGradient id="bandShade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#000" stop-opacity="0"/>
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="125%">
+      <feDropShadow dx="0" dy="12" stdDeviation="14" flood-color="#000" flood-opacity="0.28"/>
+    </filter>
+  </defs>
+
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#paper)" filter="url(#shadow)"/>
+
+  <g clip-path="url(#tile)">
+    <!-- yellow header -->
+    <rect x="100" y="100" width="824" height="248" fill="url(#band)"/>
+    <rect x="100" y="100" width="824" height="6" fill="#fff" opacity="0.35"/>
+    <!-- shadow cast by the header onto the paper -->
+    <rect x="100" y="348" width="824" height="22" fill="url(#bandShade)"/>
+    <!-- perforation dots where the sheet tears off -->
+    <g fill="#c4c4c8">
+      <circle cx="160" cy="400" r="9"/><circle cx="216" cy="400" r="9"/><circle cx="272" cy="400" r="9"/>
+      <circle cx="328" cy="400" r="9"/><circle cx="384" cy="400" r="9"/><circle cx="440" cy="400" r="9"/>
+      <circle cx="496" cy="400" r="9"/><circle cx="552" cy="400" r="9"/><circle cx="608" cy="400" r="9"/>
+      <circle cx="664" cy="400" r="9"/><circle cx="720" cy="400" r="9"/><circle cx="776" cy="400" r="9"/>
+      <circle cx="832" cy="400" r="9"/><circle cx="888" cy="400" r="9"/>
+    </g>
+    <!-- ruled lines -->
+    <g fill="#d9d9de">
+      <rect x="100" y="516" width="824" height="7"/>
+      <rect x="100" y="640" width="824" height="7"/>
+      <rect x="100" y="764" width="824" height="7"/>
+    </g>
+  </g>
+
+  <!-- hairline edge -->
+  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="none" stroke="#000" stroke-opacity="0.08"/>
+</svg>

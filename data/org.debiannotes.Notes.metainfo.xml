@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.debiannotes.Notes</id>
+  <name>Notes</name>
+  <summary>Jot down thoughts, checklists, tables and sketches</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <launchable type="desktop-id">org.debiannotes.Notes.desktop</launchable>
+  <description>
+    <p>A fast, private notes app with a clean three-pane layout: folders, a note list and the editor.</p>
+    <ul>
+      <li>Titles, headings, lists, checklists, tables, block quotes and colours</li>
+      <li>Images, file attachments and sketches</li>
+      <li>Folders and subfolders, pinned notes, hashtags and search</li>
+      <li>Password-locked notes, Recently Deleted, list and gallery views</li>
+      <li>Light and dark appearance, export to PDF, HTML, Markdown and text</li>
+    </ul>
+  </description>
+  <categories><category>Office</category><category>Utility</category></categories>
+  <releases><release version="0.1.0" date="2026-10-10"/></releases>
+</component>
