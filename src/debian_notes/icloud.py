@@ -1163,30 +1163,44 @@ class ICloudImporter:
         self.client.modify([{"operationType": "update", "record": update}])
         return self._after_push(note_id, name, text)
 
-    def push_trash(self, note_id):
-        """Move the iCloud copy of a note to Recently Deleted (like deleting it on the iPhone)."""
-        self._background(note_id, lambda: self._push_trash(note_id))
+    def push_trash(self, note_ids):
+        """Move the iCloud copies of notes to Recently Deleted (like deleting them on the iPhone)."""
+        ids = note_ids if isinstance(note_ids, list) else [note_ids]
+        self._background(ids[0] if len(ids) == 1 else None, lambda: self._push_trash(ids))
 
-    def _push_trash(self, note_id):
+    def _push_trash(self, note_ids):
         self._ensure_client()
-        name, st = self._tracked(note_id)
-        if name is None:
-            return {"ok": False, "message": "This note isn't in iCloud."}
-        back = self.client.lookup([name])
-        if not back or back[0].get("serverErrorCode"):
-            return {"ok": True, "trashed": True, "already": True}
-        rec = back[0]
-        ms = int(time.time() * 1000)
+        # Look at every mapping, also ones whose local note is already gone (deleted right after this call).
+        state = self._on_main(lambda: self.store.import_state(SOURCE))
+        names = [name for name, st in state.items() if st["note_id"] in note_ids]
         trash = {"recordName": TRASH_FOLDER, "action": "VALIDATE"}
-        self._log({"push_trash": name})
-        self.client.modify([{"operationType": "update", "record": {
-            "recordName": name, "recordType": rec.get("recordType", "Note"), "recordChangeTag": rec.get("recordChangeTag"),
-            "fields": {"Folder": {"value": trash, "type": "REFERENCE"},
-                       "Folders": {"value": [trash], "type": "REFERENCE_LIST"},
-                       "FoldersModificationDate": {"value": ms, "type": "TIMESTAMP"}}}}])
-        res = self._after_push(note_id, name, None)
-        res["trashed"] = True
-        return res
+        ms = int(time.time() * 1000)
+        ops = []
+        for rec in self.client.lookup(names) if names else []:
+            if rec.get("serverErrorCode") or rec_ref(rec, "Folder") == TRASH_FOLDER:
+                continue
+            ops.append({"operationType": "update", "record": {
+                "recordName": rec["recordName"], "recordType": rec.get("recordType", "Note"),
+                "recordChangeTag": rec.get("recordChangeTag"),
+                "fields": {"Folder": {"value": trash, "type": "REFERENCE"},
+                           "Folders": {"value": [trash], "type": "REFERENCE_LIST"},
+                           "FoldersModificationDate": {"value": ms, "type": "TIMESTAMP"}}}})
+        self._log({"push_trash": [op["record"]["recordName"] for op in ops]})
+        if ops:
+            self.client.modify(ops)
+
+        def forget():
+            # The iCloud copies are in Recently Deleted now; stop tracking them so sync doesn't bring them back.
+            for name in names:
+                self.store.forget_import(SOURCE, name)
+                self.store.forget_import(PUSH_SOURCE, name)
+            self.store.commit()
+
+        self._on_main(forget)
+        for op in ops:
+            (self.records or {}).pop(op["record"]["recordName"], None)
+        self._save_cache()
+        return {"ok": True, "trashed": len(ops)}
 
     def _after_push(self, note_id, name, text):
         """Read the record back, verify, and mark the local copy as in sync."""

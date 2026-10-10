@@ -279,6 +279,8 @@ class PushChangesTest(unittest.TestCase):
         self.assertEqual(self.cloud.ops, [])
 
     def test_move_to_recently_deleted(self):
-        res = self.imp._push_trash(self.nid)
-        self.assertTrue(res["trashed"])
+        self.store.delete_note(self.nid)  # already gone locally (deleted from Recently Deleted)
+        res = self.imp._push_trash([self.nid])
+        self.assertEqual(res["trashed"], 1)
         self.assertEqual(self.cloud.records["N1"]["fields"]["Folder"]["value"]["recordName"], "TrashFolder-CloudKit")
+        self.assertNotIn("N1", self.store.import_state("icloud"))  # sync won't bring it back

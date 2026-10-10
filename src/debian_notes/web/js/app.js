@@ -106,15 +106,29 @@
   }
 
   // Deleting a note that also lives in iCloud: optionally move the iCloud copy to Recently Deleted too.
-  A.confirmICloudDelete = async function (id) {
-    if (!pushEnabled() || !tracked.has(id)) return true;
+  // Returns false when cancelled. `permanent` = deleting from Recently Deleted (asks the usual confirmation too).
+  A.confirmICloudDelete = async function (ids, permanent = false) {
+    ids = Array.isArray(ids) ? ids : [ids];
+    const inCloud = ids.filter((id) => tracked.has(id));
+    if (!pushEnabled() || !inCloud.length) {
+      if (!permanent) return true;
+      return N.ui.confirm(ids.length === 1 ? 'Are you sure you want to delete this note?' : `Delete ${ids.length} notes permanently?`,
+        ids.length === 1 ? "This note will be deleted immediately. You can't undo this action." : "You can't undo this action.", 'Delete', true);
+    }
+    const many = inCloud.length > 1;
     const r = await N.ui.sheet({
-      icon: 'cloud', title: 'Also delete this note in iCloud?',
-      message: 'It will be moved to Recently Deleted in iCloud as well, like deleting it on your iPhone. You can recover it there for 30 days.',
-      buttons: [{ label: 'Cancel', value: null }, { label: 'Only Here', value: 'local' }, { label: 'Also in iCloud', value: 'both', primary: true, danger: true }],
+      icon: 'cloud',
+      title: many ? `Also delete ${inCloud.length} notes in iCloud?` : 'Also delete this note in iCloud?',
+      message: (permanent ? 'It will be deleted from this computer permanently. ' : '') +
+        `In iCloud ${many ? 'they move' : 'it moves'} to Recently Deleted, like deleting on your iPhone, and can be recovered there for 30 days.`,
+      buttons: [{ label: 'Cancel', value: null }, { label: 'Only Here', value: 'local' },
+        { label: 'Here and in iCloud', value: 'both', primary: true, danger: true }],
     });
     if (r.button === null) return false;
-    if (r.button === 'both') N.send('icloudPushTrash', id);
+    if (r.button === 'both') {
+      N.send('icloudPushTrash', inCloud);
+      inCloud.forEach((id) => tracked.delete(id));
+    }
     return true;
   };
 
@@ -194,7 +208,11 @@
       return;
     }
     if (res.unchanged) { N.ui.toast('Nothing to send — iCloud already has this version'); return; }
-    if (res.trashed) { N.ui.toast('Moved to Recently Deleted in iCloud'); A.refreshTracked(); return; }
+    if (res.trashed !== undefined) {
+      N.ui.toast(res.trashed ? `Moved ${res.trashed === 1 ? 'the note' : res.trashed + ' notes'} to Recently Deleted in iCloud` : 'Already deleted in iCloud');
+      A.refreshTracked();
+      return;
+    }
     if (res.updated) {
       N.ui.alert('Changes sent to iCloud',
         (res.verified ? 'iCloud stored exactly your text. ' : 'iCloud accepted the changes, but reading them back didn’t match — please check the note on your iPhone. ') +
@@ -420,12 +438,7 @@
   A.deleteNote = async function (id = S.currentNoteId) {
     const n = S.notes.get(id);
     if (!n) return;
-    if (n.deletedAt) {
-      const ok = await N.ui.confirm('Are you sure you want to delete this note?',
-        "This note will be deleted immediately. You can't undo this action.", 'Delete', true);
-      if (!ok) return;
-    }
-    if (!n.deletedAt && !(await A.confirmICloudDelete(id))) return;
+    if (!(await A.confirmICloudDelete(id, !!n.deletedAt))) return;
     const next = neighbourOf(id);
     if (N.editor.noteId() === id) {
       await N.editor.flush();
@@ -486,8 +499,10 @@
   };
 
   A.emptyTrash = async function () {
-    const ok = await N.ui.confirm('Permanently delete all notes in Recently Deleted?',
-      "You can't undo this action.", 'Delete All', true);
+    const trashed = Array.from(S.notes.values()).filter((n) => n.deletedAt).map((n) => n.id);
+    const ok = trashed.some((id) => tracked.has(id)) && pushEnabled()
+      ? await A.confirmICloudDelete(trashed, true)
+      : await N.ui.confirm('Permanently delete all notes in Recently Deleted?', "You can't undo this action.", 'Delete All', true);
     if (!ok) return;
     if (currentNote() && currentNote().deletedAt) N.editor.unmount();
     await N.call('emptyTrash');

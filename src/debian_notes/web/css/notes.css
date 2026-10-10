@@ -9,8 +9,8 @@
   --list-w: 300px;
 
   --sidebar-bg: #eceae9;
-  --sidebar-glass: rgba(236, 234, 233, 0.72);
-  --sidebar-glass-inactive: rgba(236, 234, 233, 0.92);
+  --sidebar-glass: rgba(236, 234, 233, 0.88);
+  --sidebar-glass-inactive: rgba(236, 234, 233, 0.96);
   --list-bg: #ffffff;
   --editor-bg: #ffffff;
   --text: #1d1d1f;
@@ -60,8 +60,8 @@
 
 :root[data-theme="dark"] {
   --sidebar-bg: #2a292c;
-  --sidebar-glass: rgba(40, 38, 44, 0.68);
-  --sidebar-glass-inactive: rgba(40, 38, 44, 0.9);
+  --sidebar-glass: rgba(40, 38, 44, 0.86);
+  --sidebar-glass-inactive: rgba(40, 38, 44, 0.96);
   --list-bg: #1e1e1e;
   --editor-bg: #1e1e1e;
   --text: #e9e9eb;
