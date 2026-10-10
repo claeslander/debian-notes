@@ -106,7 +106,7 @@
       return;
     }
     if (!res.ok) {
-      if (res.signin) { N.ui.toast('Sign in to iCloud first'); N.importer.open(); return; }
+      if (res.signin) { N.ui.toast('Sign in to iCloud first'); N.importer.open({ reconnect: true }); return; }
       N.ui.alert('Couldn’t send to iCloud', res.message || 'Something went wrong.');
       return;
     }
@@ -1083,7 +1083,7 @@
     });
     searchInput().addEventListener('input', runSearch);
     document.getElementById('sync-status').addEventListener('click', () => {
-      if (N.sync.state.state === 'signin-needed') N.importer.open();
+      if (N.sync.state.state === 'signin-needed') N.importer.open({ reconnect: true });
       else if (N.sync.state.state !== 'syncing') N.send('icloudSyncNow');
     });
     document.getElementById('unlock-form').addEventListener('submit', async (e) => {

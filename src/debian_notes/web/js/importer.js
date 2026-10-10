@@ -8,6 +8,7 @@
   let st = null;      // view state
 
   const fresh = () => ({
+    reconnect: false,
     step: 'welcome', waiting: false, notice: '', account: null, records: 0, plan: null,
     selected: new Set(), keepFolders: true, skipExisting: true, includeDeleted: false, sync: true,
     progress: { done: 0, total: 0, title: '' }, result: null, error: null, busy: false,
@@ -15,16 +16,19 @@
 
   // ------------------------------------------------------------- open/close
 
-  I.open = function () {
+  // opts.reconnect: only sign in again (e.g. sync lost its session); closes and syncs once signed in.
+  I.open = function (opts = {}) {
     if (el) return;
     N.ui.closeTransient();
     st = fresh();
+    st.reconnect = !!opts.reconnect;
     el = N.el('<div class="importer-backdrop"><div class="importer" role="dialog" aria-label="Import from iCloud"></div></div>');
     document.getElementById('overlay-root').appendChild(el);
     el.addEventListener('click', onClick);
     el.addEventListener('change', onChange);
     document.addEventListener('keydown', onKey, true);
     requestAnimationFrame(() => el.classList.add('open'));
+    if (st.reconnect) { st.step = 'signin'; st.waiting = true; N.send('icloudStart'); }
     render();
   };
 
@@ -60,6 +64,13 @@
         if (st.step === 'signin') go('signin', { waiting: false, notice: 'The sign-in window was closed before you signed in.' });
         break;
       case 'signed-in':
+        if (st.reconnect) {
+          // Back in: no need to walk through the import again.
+          go('reconnected', { account: ev.account, waiting: false });
+          N.send('icloudSyncNow');
+          setTimeout(close, 1400);
+          break;
+        }
         go('scanning', { account: ev.account, waiting: false, notice: '', records: 0 });
         N.send('icloudScan');
         break;
@@ -108,7 +119,8 @@
     if (action === 'close') close();
     else if (action === 'continue') { go('signin', { waiting: true, notice: '' }); N.send('icloudStart'); }
     else if (action === 'open-signin') { st.waiting = true; st.notice = ''; render(); N.send('icloudSignIn'); }
-    else if (action === 'back-welcome') go('welcome');
+    else if (action === 'back-welcome') { if (st.reconnect) close(); else go('welcome'); }
+    else if (action === 'finish') { close(); if (N.sync.state && N.sync.state.state !== 'off') N.send('icloudSyncNow'); }
     else if (action === 'back-choose') go('choose');
     else if (action === 'cancel-scan') { N.send('icloudCancel'); go('welcome'); }
     else if (action === 'cancel-import') { N.send('icloudCancel'); b.disabled = true; b.textContent = 'Stopping…'; }
@@ -161,6 +173,7 @@
   const tile = (icon, color) => `<span class="imp-tile" style="--tile:${color}">${N.icon(icon)}</span>`;
 
   function stepper() {
+    if (st.reconnect) return '<div class="imp-steps"><div class="imp-step current"><span class="imp-step-dot">' + N.icon('cloud') + '</span><span>Reconnect to iCloud</span></div></div>';
     const map = { welcome: 0, signin: 1, scanning: 1, choose: 2, importing: 3, done: 3, error: -1 };
     const cur = map[st.step];
     return '<div class="imp-steps">' + STEPS.map((s, i) =>
@@ -197,11 +210,11 @@
 
     signin: () => `
       <div class="imp-icon-big">${N.icon('lockLarge')}</div>
-      <h1 class="imp-title">Sign in to iCloud</h1>
-      <p class="imp-sub">A secure Apple sign-in window opens next to this one.</p>
+      <h1 class="imp-title">${st.reconnect ? 'Sign in again to keep syncing' : 'Sign in to iCloud'}</h1>
+      <p class="imp-sub">${st.reconnect ? 'Your iCloud session ended. Sign in once more and syncing continues right away.' : 'A secure Apple sign-in window opens next to this one.'}</p>
       <ol class="imp-howto">
         <li><span>1</span><div>Click <b>Open Apple Sign-In</b>.</div></li>
-        <li><span>2</span><div>Sign in with your Apple ID and enter the code that appears on your iPhone or Mac.</div></li>
+        <li><span>2</span><div>Sign in with your Apple ID, tick <b>Keep me signed in</b>, and enter the code that appears on your iPhone or Mac.</div></li>
         <li><span>3</span><div>If Apple asks whether to trust this browser, choose <b>Trust</b> — you won't need a code next time.</div></li>
         <li><span>4</span><div>That's it. This screen continues on its own as soon as you're signed in.</div></li>
       </ol>
@@ -246,6 +259,7 @@
           ${p.deleted ? `<label><input type="checkbox" name="includeDeleted"${st.includeDeleted ? ' checked' : ''}><span>Also import Recently Deleted<small>${p.deleted} ${p.deleted === 1 ? 'note goes' : 'notes go'} to Recently Deleted here too.</small></span></label>` : ''}
         </div>
         ${p.locked ? `<div class="imp-notice">${N.icon('lock')} ${p.locked} locked ${p.locked === 1 ? 'note is' : 'notes are'} skipped. Remove the lock on your iPhone to import ${p.locked === 1 ? 'it' : 'them'}.</div>` : ''}
+        ${n ? '' : `<div class="imp-uptodate">${N.icon('check')} Everything in these folders is already on this computer${st.sync ? ' — sync keeps it up to date' : ''}.</div>`}
         <div data-count hidden>${n}</div>`;
     },
 
@@ -283,6 +297,13 @@
         </div>`;
     },
 
+    reconnected: () => `
+      <div class="imp-center">
+        <div class="imp-check">${N.icon('check')}</div>
+        <h1 class="imp-title">You're signed in again</h1>
+        <p class="imp-sub">Syncing with iCloud now.</p>
+      </div>`,
+
     error: () => `
       <div class="imp-center">
         <div class="imp-check error">!</div>
@@ -293,12 +314,14 @@
 
   const FOOTERS = {
     welcome: () => '<button class="push-btn" data-do="close">Cancel</button><button class="push-btn primary" data-do="continue">Continue</button>',
-    signin: () => '<button class="push-btn" data-do="back-welcome">Back</button><button class="push-btn primary" data-do="open-signin">Open Apple Sign-In</button>',
+    signin: () => `<button class="push-btn" data-do="back-welcome">${st.reconnect ? 'Cancel' : 'Back'}</button><button class="push-btn primary" data-do="open-signin">Open Apple Sign-In</button>`,
+    reconnected: () => '<button class="push-btn primary" data-do="close">Done</button>',
     scanning: () => '<button class="push-btn" data-do="cancel-scan">Cancel</button>',
     choose: () => {
       const n = importCount();
       return '<button class="push-btn" data-do="close">Cancel</button>' +
-        `<button class="push-btn primary" data-do="start-import"${n ? '' : ' disabled'}>${n ? `Import ${n} ${n === 1 ? 'Note' : 'Notes'}` : 'Nothing to Import'}</button>`;
+        (n ? `<button class="push-btn primary" data-do="start-import">Import ${n} ${n === 1 ? 'Note' : 'Notes'}</button>`
+          : '<button class="push-btn primary" data-do="finish">Done</button>');
     },
     importing: () => '<button class="push-btn" data-do="cancel-import">Stop</button>',
     done: () => '<button class="push-btn imp-left" data-do="sign-out">Sign Out of iCloud</button><button class="push-btn primary" data-do="show-notes">Show My Notes</button>',

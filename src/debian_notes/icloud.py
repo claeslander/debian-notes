@@ -140,8 +140,9 @@ def rec_asset(rec, *names):
 class CloudClient:
     """Minimal CloudKit web client authenticated with iCloud.com cookies."""
 
-    def __init__(self, cookies):
+    def __init__(self, cookies, on_change=None):
         self.cookies = dict(cookies)
+        self.on_change = on_change  # called with the cookie dict whenever Apple refreshes a cookie
         self.client_id = str(uuid.uuid4()).upper()
         self.dsid = None
         self.ck_url = None
@@ -163,11 +164,20 @@ class CloudClient:
             req.add_header("Cookie", "; ".join(f"{k}={v}" for k, v in self.cookies.items()))
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
+                changed = False
                 for header in resp.headers.get_all("Set-Cookie") or []:
                     name, _, rest = header.partition("=")
+                    name = name.strip()
                     value = rest.split(";", 1)[0]
-                    if name.strip():
-                        self.cookies[name.strip()] = value
+                    if not name:
+                        continue
+                    if not value or re.search(r"max-age=0\b", rest, re.I):
+                        changed |= self.cookies.pop(name, None) is not None
+                    elif self.cookies.get(name) != value:
+                        self.cookies[name] = value
+                        changed = True
+                if changed and self.on_change:
+                    self.on_change(dict(self.cookies))
                 payload = resp.read()
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403, 421):
@@ -316,6 +326,9 @@ class ICloudImporter:
         self.cancel_event = threading.Event()
         self.log_path = os.path.join(data_dir, "icloud-import-log.json")
         self.cache_path = os.path.join(data_dir, "icloud-cache.json")
+        # Apple rotates its session token; the newest cookies are kept here (private file) so a refreshed
+        # session survives restarts instead of falling back to the stale copy in the sign-in profile.
+        self.session_path = os.path.join(data_dir, "icloud-web", "session.json")
         self.token = None
         self.busy = False
         self.sync_timer = None
@@ -386,7 +399,16 @@ class ICloudImporter:
     def start(self):
         """Check for an existing session; emits signed-in or signin-needed."""
         self.cancel_event.clear()
-        self.session.get_cookies(lambda cookies: self._validate(cookies, quiet=True))
+
+        def work():
+            try:
+                self._ensure_client()
+            except NotSignedIn:
+                self.emit("signin-needed")
+                return
+            self.emit("signed-in", account=self.account)
+
+        self._thread(work)
 
     def _validate(self, cookies, quiet=False):
         if AUTH_COOKIE not in cookies:
@@ -399,14 +421,13 @@ class ICloudImporter:
 
         def work():
             try:
-                client = CloudClient(cookies)
-                try:
-                    account = client.validate()
-                except NotSignedIn:
+                client = self._client_for(cookies)
+                if client is None:
                     if quiet:
                         self.emit("signin-needed")
                     return
-                self.client, self.account = client, account
+                self.client = client
+                account = self.account
                 GLib.idle_add(self._close_signin)
                 self.emit("signed-in", account=account)
             finally:
@@ -445,10 +466,11 @@ class ICloudImporter:
         self.account = None
         self.records = None
         self.token = None
-        try:
-            os.remove(self.cache_path)
-        except OSError:
-            pass
+        for path in (self.cache_path, self.session_path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
         if self.sync_config().get("enabled"):
             self._set_sync_state("signin-needed", message="Sign in to iCloud to keep syncing.")
         self.session.sign_out(lambda: self.emit("signed-out"))
@@ -740,9 +762,36 @@ class ICloudImporter:
         payload = json.dumps(self.sync_state)
         GLib.idle_add(lambda: (self.win.eval_js(f"window.N && N.sync && N.sync.onStatus({payload})"), False)[1])
 
-    def _ensure_client(self):
-        if self.client is not None:
-            return
+    def _saved_session(self):
+        try:
+            with open(self.session_path, encoding="utf-8") as fh:
+                return json.load(fh)
+        except (OSError, ValueError):
+            return {}
+
+    def _save_session(self, cookies):
+        tmp = self.session_path + ".tmp"
+        try:
+            with open(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w", encoding="utf-8") as fh:
+                json.dump(cookies, fh)
+            os.replace(tmp, self.session_path)
+        except OSError:
+            pass
+
+    def _client_for(self, cookies):
+        """A validated client for these cookies, or None."""
+        if AUTH_COOKIE not in (cookies or {}):
+            return None
+        client = CloudClient(cookies, on_change=self._save_session)
+        try:
+            account = client.validate()
+        except NotSignedIn:
+            return None
+        self._save_session(client.cookies)
+        self.account = account
+        return client
+
+    def _webkit_cookies(self):
         box, done = {}, threading.Event()
 
         def got(cookies):
@@ -751,11 +800,15 @@ class ICloudImporter:
 
         GLib.idle_add(lambda: (self.session.get_cookies(got), False)[1])
         done.wait(30)
-        cookies = box.get("cookies") or {}
-        if AUTH_COOKIE not in cookies:
+        return box.get("cookies") or {}
+
+    def _ensure_client(self):
+        """Reuse the newest saved session first, then the sign-in profile's cookies."""
+        if self.client is not None:
+            return
+        client = self._client_for(self._saved_session()) or self._client_for(self._webkit_cookies())
+        if client is None:
             raise NotSignedIn()
-        client = CloudClient(cookies)
-        self.account = client.validate()
         self.client = client
 
     def _load_cache(self):
