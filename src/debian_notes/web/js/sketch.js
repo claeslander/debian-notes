@@ -99,8 +99,7 @@
 
     function close() {
       document.removeEventListener('keydown', onKey, true);
-      backdrop.classList.remove('open');
-      setTimeout(() => backdrop.remove(), 180);
+      backdrop.remove();
     }
 
     function onKey(e) {

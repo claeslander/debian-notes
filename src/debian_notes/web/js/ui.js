@@ -163,8 +163,7 @@
     const { pop, anchor, onClose } = currentPopover;
     currentPopover = null;
     anchor.classList.remove('pressed');
-    pop.classList.add('closing');
-    setTimeout(() => pop.remove(), 120);
+    pop.remove();
     if (onClose) onClose();
   };
 
@@ -225,8 +224,8 @@
           }
         }
         document.removeEventListener('keydown', onKey, true);
-        backdrop.classList.remove('open');
-        setTimeout(() => backdrop.remove(), 180);
+        // Close instantly: a fade-out over the transparent window flickered in WebKitGTK.
+        backdrop.remove();
         resolve({ button, values: values() });
       }
 

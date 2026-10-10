@@ -38,8 +38,7 @@
     document.removeEventListener('keydown', onKey, true);
     const node = el;
     el = null;
-    node.classList.remove('open');
-    setTimeout(() => node.remove(), 200);
+    node.remove();
   }
 
   function onKey(e) {
