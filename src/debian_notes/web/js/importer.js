@@ -64,10 +64,10 @@
         N.send('icloudScan');
         break;
       case 'scan-progress':
-        st.records = ev.records;
+        st.records = ev.notes;
         if (st.step === 'scanning') {
           const c = el.querySelector('[data-records]');
-          if (c) c.textContent = ev.records.toLocaleString();
+          if (c) c.textContent = ev.notes.toLocaleString();
         }
         break;
       case 'scan-done':
@@ -211,7 +211,7 @@
         <div class="imp-spinner big"></div>
         <h1 class="imp-title">Looking for your notes…</h1>
         <p class="imp-sub">${st.account ? `Signed in as <b>${esc(st.account.name || st.account.appleId)}</b>. ` : ''}This can take a minute if you have many notes.</p>
-        <div class="imp-counter"><span data-records>${st.records.toLocaleString()}</span> items found</div>
+        <div class="imp-counter"><span data-records>${st.records.toLocaleString()}</span> notes found so far</div>
       </div>`,
 
     choose: () => {

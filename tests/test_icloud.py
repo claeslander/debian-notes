@@ -68,6 +68,26 @@ class ImporterConversionTest(unittest.TestCase):
         self.assertEqual(folders["F2"]["parentId"], "F1")
         self.assertEqual(folders["F2"]["count"], 1)
 
+    def test_plan_from_worker_thread(self):
+        # The real scan runs in a worker thread; SQLite access must hop to the main loop.
+        import threading
+        from gi.repository import GLib
+        loop = GLib.MainLoop()
+        result = {}
+
+        def work():
+            try:
+                result["plan"] = self.imp._plan()
+            except Exception as exc:
+                result["error"] = exc
+            GLib.idle_add(loop.quit)
+
+        threading.Thread(target=work).start()
+        GLib.timeout_add_seconds(5, loop.quit)
+        loop.run()
+        self.assertNotIn("error", result)
+        self.assertEqual(result["plan"]["total"], 1)
+
     def test_convert_and_folder_path(self):
         stats = {"tables": 0, "attachments": 0, "skippedAttachments": 0}
         item = self.imp._convert(self.imp.records["N1"], stats)

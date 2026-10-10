@@ -196,7 +196,7 @@ class CloudClient:
             if z.get("serverErrorCode"):
                 raise RuntimeError(z.get("reason") or z["serverErrorCode"])
             records.extend(z.get("records") or [])
-            on_progress(len(records))
+            on_progress(records)
             token = z.get("syncToken")
             if not z.get("moreComing") or not token:
                 return records
@@ -290,6 +290,28 @@ class ICloudImporter:
     def emit(self, kind, **data):
         payload = json.dumps(dict(data, type=kind))
         GLib.idle_add(lambda: (self.win.eval_js(f"window.N && N.importer && N.importer.onEvent({payload})"), False)[1])
+
+    def _on_main(self, fn):
+        """Run fn on the GTK main thread (where the SQLite connection lives) and return its result."""
+        if threading.current_thread() is threading.main_thread():
+            return fn()
+        box = {}
+        done = threading.Event()
+
+        def call():
+            try:
+                box["value"] = fn()
+            except Exception as exc:
+                box["error"] = exc
+            finally:
+                done.set()
+            return False
+
+        GLib.idle_add(call)
+        done.wait()
+        if "error" in box:
+            raise box["error"]
+        return box["value"]
 
     def _thread(self, target, *args):
         def run():
@@ -392,8 +414,14 @@ class ICloudImporter:
         self._thread(self._scan)
 
     def _scan(self):
-        records = self.client.notes_records(lambda n: self.emit("scan-progress", records=n),
-                                            self.cancel_event.is_set)
+        try:
+            os.remove(self.log_path)  # one log per run
+        except OSError:
+            pass
+        records = self.client.notes_records(
+            lambda recs: self.emit("scan-progress", notes=sum(
+                1 for r in recs if r.get("recordType") == "Note" and not r.get("deleted") and not rec_int(r, "Deleted"))),
+            self.cancel_event.is_set)
         self.records = {}
         for rec in records:
             if rec.get("deleted") or not rec.get("recordName"):
@@ -406,7 +434,17 @@ class ICloudImporter:
         return [r for r in self.records.values() if r.get("recordType") == "Note"]
 
     def _note_folder(self, rec):
-        return rec_ref(rec, "Folder", "Folders") or DEFAULT_FOLDER
+        fid = rec_ref(rec, "Folder", "Folders")
+        if not fid:
+            us = self._user_specific().get(rec["recordName"])
+            fid = us and rec_ref(us, "Folder")
+        return fid or DEFAULT_FOLDER
+
+    def _user_specific(self):
+        if getattr(self, "_us_cache", None) is None or self._us_cache[0] is not self.records:
+            self._us_cache = (self.records, {rec_ref(r, "Note"): r for r in self.records.values()
+                                             if r.get("recordType") == "Note_UserSpecific"})
+        return self._us_cache[1]
 
     def _is_locked(self, rec):
         fields = rec.get("fields") or {}
@@ -418,7 +456,8 @@ class ICloudImporter:
     def _folders(self):
         folders = {}
         for rec in self.records.values():
-            if rec.get("recordType") != "Folder" or rec["recordName"] == TRASH_FOLDER or rec_int(rec, "Deleted"):
+            if rec.get("recordType") not in ("Folder", "Folder_UserSpecific") or rec["recordName"] == TRASH_FOLDER \
+                    or rec_int(rec, "Deleted"):
                 continue
             name = rec_text(rec, "TitleEncrypted", "Title") or ("Notes" if rec["recordName"] == DEFAULT_FOLDER else "Folder")
             folders[rec["recordName"]] = {"id": rec["recordName"], "name": name,
@@ -429,8 +468,10 @@ class ICloudImporter:
 
     def _plan(self):
         folders = self._folders()
-        imported = self.store.imported(SOURCE)
-        counts, locked, deleted, already = {}, 0, 0, 0
+        imported = self._on_main(lambda: self.store.imported(SOURCE))
+        counts, deleted, already = {}, 0, 0
+        locked = sum(1 for r in self.records.values()
+                     if r.get("recordType") == "PasswordProtectedNote" and not rec_int(r, "Deleted"))
         for rec in self._notes():
             if self._is_deleted(rec):
                 deleted += 1
@@ -448,7 +489,13 @@ class ICloudImporter:
             f["count"] = counts.get(f["id"], 0)
             if f["parentId"] not in folders:
                 f["parentId"] = None
-        return {"folders": list(folders.values()), "total": sum(counts.values()), "locked": locked,
+        # Only show folders that hold notes (and their parents); iCloud keeps many system/empty folder records.
+        keep = set()
+        for fid in counts:
+            while fid and fid not in keep and fid in folders:
+                keep.add(fid)
+                fid = folders[fid]["parentId"]
+        return {"folders": [f for f in folders.values() if f["id"] in keep], "total": sum(counts.values()), "locked": locked,
                 "deleted": deleted, "alreadyImported": already, "account": self.account}
 
     # ------------------------------------------------------------- import
@@ -465,8 +512,10 @@ class ICloudImporter:
         include_deleted = bool(options.get("includeDeleted"))
         skip_existing = options.get("skipExisting", True)
         keep_folders = options.get("keepFolders", True)
-        imported = self.store.imported(SOURCE)
+        imported = self._on_main(lambda: self.store.imported(SOURCE))
         folders = self._folders()
+        pinned = {rec_ref(r, "Note") for r in self.records.values()
+                  if r.get("recordType") == "Note_UserSpecific" and rec_int(r, "IsPinned")}
 
         todo = []
         for rec in self._notes():
@@ -499,6 +548,7 @@ class ICloudImporter:
             item["folder_path"] = self._folder_path(rec, folders) if keep_folders else ["iCloud"]
             item["deleted"] = self._is_deleted(rec)
             item["previous"] = imported.get(rec["recordName"], (None,))[0]
+            item["pinned"] = rec["recordName"] in pinned
             batch.append(item)
             if len(batch) >= 10 or i == total - 1:
                 self._write(batch, stats)
@@ -541,6 +591,8 @@ class ICloudImporter:
                         note_id=item["previous"])
                     if item["deleted"]:
                         self.store.db.execute("UPDATE notes SET deleted_at = ? WHERE id = ?", (time.time(), note_id))
+                    elif item.get("pinned"):
+                        self.store.db.execute("UPDATE notes SET pinned = 1 WHERE id = ?", (note_id,))
                     stats["updated" if item["previous"] else "notes"] += 1
                 self.store.commit()
             finally:
@@ -595,12 +647,12 @@ class ICloudImporter:
 
     def inline_text(self, ident):
         rec = self.attachment_record(ident)
-        return rec_text(rec, "AltTextEncrypted", "AltText") if rec else None
+        return rec_text(rec, "AltTextEncrypted", "AltText", "DisplayTextEncrypted") if rec else None
 
     def _attachment_html(self, ident, uti, stats):
         rec = self.attachment_record(ident)
-        uti = uti or (rec and rec_text(rec, "UTIEncrypted", "AttachmentUTIEncrypted", "UTI", "TypeUTI")) or ""
-        if uti.startswith("com.apple.notes.inlinetextattachment") or (rec and rec.get("recordType") == "InlineAttachment"):
+        uti = uti or (rec and rec_text(rec, "UTI", "UTIEncrypted", "AttachmentUTIEncrypted", "TypeUTI")) or ""
+        if uti.startswith("com.apple.notes.inlinetextattachment") or (rec and rec.get("recordType") in ("InlineAttachment", "Hashtag")):
             text = self.inline_text(ident)
             return _esc(text) if text else ""
         if rec is None:
@@ -650,12 +702,14 @@ class ICloudImporter:
         return None
 
     def _preview_asset(self, rec):
-        for ref in rec_refs(rec, "PreviewImages"):
-            prev = self.records.get(ref or "")
-            asset = prev and rec_asset(prev, "Asset", "PreviewImage")
-            if asset:
-                return asset
-        return rec_asset(rec, "FallbackImage", "FallbackImageEncrypted", "PreviewImage")
+        f = _field(rec, "PreviewImages")
+        assets = [a for a in (f.get("value") if f else None) or [] if isinstance(a, dict) and a.get("downloadURL")]
+        if assets:
+            widths = (_field(rec, "PreviewWidths") or {}).get("value") or []
+            if len(widths) == len(assets):
+                return max(zip(widths, assets), key=lambda wa: wa[0] or 0)[1]
+            return assets[-1]
+        return rec_asset(rec, "FallbackImage", "PreviewImage")
 
     def _save(self, data, filename):
         base = re.sub(r"[^\w.\- ]+", "_", os.path.basename(filename or "attachment")).strip() or "attachment"
