@@ -272,7 +272,7 @@ body.resizing, body.resizing * { cursor: col-resize !important; }
 .note-section:first-child .note-section-title { padding-top: 4px; }
 .note-row {
   position: relative; display: flex; align-items: center; gap: 10px;
-  padding: 9px 10px 10px 12px; border-radius: 8px;
+  padding: 9px 12px 10px 12px; border-radius: 8px;
 }
 .note-row + .note-row::before {
   content: ""; position: absolute; top: 0; left: 12px; right: 10px; height: 1px; background: var(--separator);
@@ -285,14 +285,14 @@ body.list-focused:not(.window-inactive) .note-row.selected .note-folder { color:
 :root[data-theme="dark"] body.list-focused:not(.window-inactive) .note-row.selected .note-sub,
 :root[data-theme="dark"] body.list-focused:not(.window-inactive) .note-row.selected .note-folder { color: rgba(255, 255, 255, 0.75); }
 .note-row-text { flex: 1; min-width: 0; }
-.note-title { font-weight: 700; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
+.note-title { font-weight: 750; font-size: 13.5px; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: flex; align-items: center; gap: 4px; }
 .note-lock { color: var(--secondary); display: inline-flex; }
 .note-lock .icon { width: 12px; height: 12px; }
-.note-sub { display: flex; gap: 8px; font-size: 12px; color: var(--secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; }
-.note-date { color: var(--text-soft); flex: none; }
-.note-row.selected .note-date { color: inherit; }
+.note-sub { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; font-weight: 500; line-height: 1.35; color: var(--secondary); margin-top: 2px; white-space: nowrap; overflow: hidden; }
+.note-row-date { color: var(--text-soft); flex: none; font-weight: 500; }
+.note-row.selected .note-row-date { color: inherit; }
 .note-snippet { overflow: hidden; text-overflow: ellipsis; }
-.note-folder { display: flex; align-items: center; gap: 4px; font-size: 12px; color: var(--secondary); margin-top: 2px; }
+.note-folder { display: flex; align-items: center; gap: 4px; font-size: 12.5px; font-weight: 500; line-height: 1.35; color: var(--secondary); margin-top: 3px; }
 .note-folder .icon { width: 13px; height: 13px; }
 .note-thumb { width: 46px; height: 46px; object-fit: cover; border-radius: 6px; border: 1px solid var(--separator); flex: none; }
 .note-list mark { background: var(--search-hl); color: inherit; border-radius: 2px; }

@@ -81,7 +81,7 @@
     return `<div class="note-row${n.id === s.currentNoteId ? ' selected' : ''}" data-id="${n.id}" draggable="true">` +
       '<div class="note-row-text">' +
       `<div class="note-title">${n.locked ? `<span class="note-lock">${N.icon('lockSmall')}</span>` : ''}${highlight(title)}</div>` +
-      `<div class="note-sub"><span class="note-date">${N.esc(date)}</span><span class="note-snippet">${highlight(sub)}</span></div>` +
+      `<div class="note-sub"><span class="note-row-date">${N.esc(date)}</span><span class="note-snippet">${highlight(sub)}</span></div>` +
       (showFolder() ? `<div class="note-folder">${N.icon(n.deletedAt ? 'trashSidebar' : 'folder')}<span>${N.esc(folderName(n.folderId))}</span></div>` : '') +
       `</div>${thumb}</div>`;
   }
