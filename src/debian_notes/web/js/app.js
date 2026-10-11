@@ -271,6 +271,15 @@
         if (c.created) parts.push(`${c.created} created in iCloud`);
         if (c.deleted) parts.push(`${c.deleted} deleted in iCloud`);
         if (c.skipped) parts.push(`${c.skipped} couldn't be sent`);
+        const problems = [...(c.skippedReasons || []), ...(c.warnings || [])];
+        if (problems.length) {
+          N.ui.sheet({
+            icon: 'cloudAlert', wide: true,
+            title: c.skipped ? `${c.skipped} ${c.skipped === 1 ? 'note' : 'notes'} couldn't be sent` : 'Sent, with a note',
+            message: problems.join('\n\n'),
+            buttons: [{ label: 'OK', value: 'ok', primary: true }],
+          });
+        }
         if (c.created || c.sent) A.refreshTracked();
         if (parts.length) N.ui.toast(`iCloud: ${parts.join(', ')}`);
       }

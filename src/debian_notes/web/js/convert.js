@@ -499,10 +499,13 @@
           if (t) out.push(Object.assign({ text: t }, fmt));
           continue;
         }
-        if (n.nodeType !== 1 || n.classList.contains('nt-missing') || n.classList.contains('nt-file')) continue;
+        if (n.nodeType !== 1) continue;
+        // Attachments (images, files, placeholders) travel as markers so the iCloud original stays in place.
+        if (n.classList.contains('nt-missing') || n.classList.contains('nt-file')) { out.push({ attachment: 'file' }); continue; }
         const tag = n.tagName;
         if (tag === 'BR') { out.push({ br: true }); continue; }
-        if (tag === 'IMG' || tag === 'UL' || tag === 'OL' || tag === 'TABLE') continue;
+        if (tag === 'IMG') { out.push({ attachment: 'image' }); continue; }
+        if (tag === 'UL' || tag === 'OL' || tag === 'TABLE') continue;
         const f = Object.assign({}, fmt);
         if (tag === 'B' || tag === 'STRONG' || /^(bold|[6-9]00)$/.test(n.style.fontWeight)) f.bold = true;
         if (tag === 'I' || tag === 'EM') f.italic = true;
@@ -543,12 +546,13 @@
       else if (tag === 'PRE') block.textContent.split('\n').forEach((line) => paras.push({ style: 4, runs: [{ text: line }] }));
       else if (tag === 'UL' || tag === 'OL') list(block, 0);
       else if (tag === 'TABLE') {
-        block.querySelectorAll('tr').forEach((tr) => paras.push({
-          style: null, runs: [{ text: Array.from(tr.children).map((td) => td.innerText.replace(/\s+/g, ' ').trim()).join('\t') }],
-        }));
+        // One attachment marker; the tab-separated text is used when a brand-new note is created.
+        const tsv = Array.from(block.querySelectorAll('tr')).map((tr) =>
+          Array.from(tr.children).map((td) => td.textContent.replace(/\s+/g, ' ').trim()).join('\t')).join('\n');
+        paras.push({ style: null, runs: [{ attachment: 'table', fallback: tsv }] });
       } else push(null, runsOf(block, {}, []), block.dataset.indent ? { indent: +block.dataset.indent } : {});
     }
-    while (paras.length > 1 && !paras[paras.length - 1].runs.some((r) => r.text && r.text.trim())) paras.pop();
+    while (paras.length > 1 && !paras[paras.length - 1].runs.some((r) => (r.text && r.text.trim()) || r.attachment)) paras.pop();
     return paras;
   };
 

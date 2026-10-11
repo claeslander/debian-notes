@@ -172,6 +172,18 @@ class PullSyncTest(ImporterConversionTest):
         self.assertIn("Theirs", self.note()["body"])
         self.assertNotEqual(self.note()["id"], local["id"])
 
+    def test_same_text_on_both_sides_is_not_a_conflict(self):
+        self.sync(full=True)
+        local = self.note()
+        new_rec = bump(self.imp.records["N1"], [("Focaccia v2\n", dict(style=0))])
+        # The local copy was "edited" (timestamp moved) but already says exactly what iCloud now says.
+        self.store.db.execute("UPDATE notes SET plain = ?, updated_at = ? WHERE id = ?",
+                              ("Focaccia v2\n", local["updated_at"] + 100, local["id"]))
+        self.imp.records["N1"] = new_rec
+        stats = self.sync(touched=["N1"])
+        self.assertEqual((stats["conflicts"], stats["updated"]), (0, 1))
+        self.assertEqual(self.note()["id"], local["id"])
+
     def test_deleted_on_iphone_goes_to_trash(self):
         self.sync(full=True)
         nid = self.note()["id"]

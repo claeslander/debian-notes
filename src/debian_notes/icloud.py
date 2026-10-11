@@ -934,6 +934,11 @@ class ICloudImporter:
             remote_modified = rec_time(rec, "ModificationDate", "modified")
             if remote_modified > (st["modified"] or 0) + 1 or name in force_content:
                 item = self._item(rec, stats, keep_folders, pinned)
+                if edited_here and item is not None:
+                    # Only a real conflict when the local text actually differs from the new iCloud text.
+                    local_plain = self._on_main(lambda nid=st["note_id"]: self.store.note_row(nid)["plain"])
+                    if _same_text(local_plain, item["data"]["plain"]):
+                        edited_here = False
                 if edited_here:
                     ops.append(("conflict", name, st["note_id"], item))
                 else:
@@ -1163,9 +1168,10 @@ class ICloudImporter:
         if not old_blob:
             raise RuntimeError("iCloud returned this note without its text.")
         now = time.time()
-        blob, text, changed = an.edit_note_store(old_blob, payload.get("paragraphs") or [], self._replica(), now,
-                                                 lambda: uuid.uuid4().bytes)
+        blob, text, changed, info = an.edit_note_store(old_blob, payload.get("paragraphs") or [], self._replica(), now,
+                                                       lambda: uuid.uuid4().bytes, inline_text=self.inline_display)
         if not changed:
+            self._mark_in_sync(note_id, name, rec_time(rec, "ModificationDate", "modified"))
             return {"ok": True, "unchanged": True}
 
         # Version history: what iCloud had, and what we are about to send.
@@ -1183,9 +1189,31 @@ class ICloudImporter:
                   "fields": {"TitleEncrypted": enc(summary["title"]), "SnippetEncrypted": enc(summary["snippet"]),
                              "TextDataEncrypted": enc(blob),
                              "ModificationDate": {"value": int(now * 1000), "type": "TIMESTAMP"}}}
-        self._log({"push_edit": name, "chars": len(text)})
+        self._log({"push_edit": name, "chars": len(text), **info})
         self.client.modify([{"operationType": "update", "record": update}])
-        return self._after_push(note_id, name, text)
+        res = self._after_push(note_id, name, text)
+        res.update(info)
+        return res
+
+    def inline_display(self, ident, uti):
+        """The text the page shows for an inline attachment (hashtag, mention, link), or None for block ones."""
+        if uti and uti.startswith("com.apple.notes.inlinetextattachment"):
+            return self.inline_text(ident) or None
+        rec = self.attachment_record(ident) if self.records is not None else None
+        if rec is not None and rec.get("recordType") in ("InlineAttachment", "Hashtag"):
+            return self.inline_text(ident) or None
+        if uti == "public.url" and rec is not None:
+            url = rec_text(rec, "URLStringEncrypted", "URLString", "URL") or ""
+            return (rec_text(rec, "TitleEncrypted", "Title") or url) or None
+        return None
+
+    def _mark_in_sync(self, note_id, name, remote_modified):
+        def mark():
+            row = self.store.note_row(note_id)
+            self.store.db.execute("UPDATE imports SET modified = ? WHERE source = ? AND external_id = ?",
+                                  (max(remote_modified, row["updated_at"]), SOURCE, name))
+            self.store.commit()
+        self._on_main(mark)
 
     def push_trash(self, note_ids):
         """Move the iCloud copies of notes to Recently Deleted (like deleting them on the iPhone)."""
@@ -1355,8 +1383,10 @@ class ICloudImporter:
 
     def _push_outgoing(self, outgoing, stats):
         self._ensure_cache()
-        stats.update(sent=0, created=0, skipped=0, skippedReasons=[])
+        stats.update(sent=0, created=0, skipped=0, skippedReasons=[], warnings=[])
+        titles = self._on_main(lambda: {r["id"]: r["title"] for r in self.store.db.execute("SELECT id, title FROM notes")})
         for item in outgoing.get("edited") or []:
+            title = titles.get(item["id"]) or "Untitled"
             try:
                 name, st = self._tracked(item["id"])
                 # Pull may have turned it into a conflict (no longer tracked) or it changed again: then don't push.
@@ -1366,10 +1396,17 @@ class ICloudImporter:
                 if res.get("ok") and not res.get("unchanged"):
                     stats["sent"] += 1
                     stats["changed"].append(item["id"])
+                if res.get("skippedAttachments"):
+                    n = res["skippedAttachments"]
+                    stats["warnings"].append(f"“{title}”: {n} new {'attachment' if n == 1 else 'attachments'} (image, table or file) "
+                                             "stayed on this computer — new attachments can't be created in iCloud yet.")
+                if not res.get("ok"):
+                    stats["skipped"] += 1
+                    stats["skippedReasons"].append(f"“{title}”: {res.get('message') or 'unknown error'}")
             except Exception as exc:
                 stats["skipped"] += 1
-                stats["skippedReasons"].append(str(exc)[:120])
-                self._log({"sync_push_skip": item["id"], "error": repr(exc)})
+                stats["skippedReasons"].append(f"“{title}”: {str(exc)[:160]}")
+                self._log({"sync_push_skip": item["id"], "error": repr(exc), "trace": traceback.format_exc()})
         deleted = [d["id"] if isinstance(d, dict) else d for d in outgoing.get("deleted") or []]
         if deleted:
             try:
@@ -1629,6 +1666,11 @@ def _resolved_plain(note, importer):
             text = text.replace(an.OBJECT_REPLACEMENT, alt or "")
         out.append(text)
     return "".join(out)
+
+
+def _same_text(a, b):
+    norm = lambda s: re.sub(r"\s+", " ", (s or "").replace(an.OBJECT_REPLACEMENT, "")).strip()
+    return norm(a) == norm(b)
 
 
 def _browser_image(path):

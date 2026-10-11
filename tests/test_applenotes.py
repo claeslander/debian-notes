@@ -213,7 +213,7 @@ class EditTest(unittest.TestCase):
 
     def edit(self, blob, lines):
         paras = [{"style": 0 if i == 0 else None, "runs": [{"text": t}]} for i, t in enumerate(lines)]
-        return an.edit_note_store(blob, paras, self.ME, 1790000100, lambda: b"C" * 16)
+        return an.edit_note_store(blob, paras, self.ME, 1790000100, lambda: b"C" * 16)[:3]
 
     def visible(self, blob):
         note = an.parse_note_store(blob)
@@ -252,13 +252,6 @@ class EditTest(unittest.TestCase):
         _, _, changed = self.edit(blob, ["Boodschappen", "melk en brood"])
         self.assertFalse(changed)
 
-    def test_refuses_attachments(self):
-        parts = [("Intro\n", {}), ("￼", dict(attachment=("A", "com.apple.notes.table")))]
-        text = "".join(p[0] for p in parts)
-        blob = note_store(text, [run(u16(t), **kw) for t, kw in parts])
-        with self.assertRaises(ValueError):
-            self.edit(blob, ["Intro", "x"])
-
 
 class BranchedEditTest(unittest.TestCase):
     """Two devices typed concurrently: the start sentinel has two branches that meet at the end sentinel."""
@@ -278,7 +271,7 @@ class BranchedEditTest(unittest.TestCase):
 
     def test_edit_keeps_branches(self):
         paras = [{"style": None, "runs": [{"text": "XAB"}]}, {"style": None, "runs": [{"text": "CD!"}]}]
-        blob, text, changed = an.edit_note_store(self.branched(), paras, b"M" * 16, 1790000000, lambda: b"C" * 16)
+        blob, text, changed, _ = an.edit_note_store(self.branched(), paras, b"M" * 16, 1790000000, lambda: b"C" * 16)
         self.assertTrue(changed)
         note = an.parse_note_store(blob)
         self.assertEqual(an.plain_text(note), "XAB\nCD!")
@@ -286,3 +279,66 @@ class BranchedEditTest(unittest.TestCase):
         self.assertEqual(len(subs[0]["children"]), 2)  # the start sentinel still has both branches
         end = next(i for i, s in enumerate(subs) if s["clock"] == an.SENTINEL_END)
         self.assertEqual(sum(end in s["children"] for s in subs), 2)  # and they still meet at the end
+
+
+
+class AttachmentEditTest(unittest.TestCase):
+    """Editing text around attachments keeps them; they are matched as single tokens."""
+    ME = b"M" * 16
+
+    def note_with(self, parts):
+        """parts: [(text, run kwargs)] -> a fresh note blob with one substring for all text."""
+        text = "".join(t for t, _ in parts)
+        n = u16(text)
+        cid = lambda r, c: f(1, r) + f(2, c)
+        subs = [f(1, cid(0, 0)) + f(2, 0) + f(3, cid(0, 0)) + f(5, 1),
+                f(1, cid(1, 0)) + f(2, n) + f(3, cid(1, 0)) + f(5, 2),
+                f(1, cid(0, an.SENTINEL_END)) + f(2, 0) + f(3, cid(0, an.SENTINEL_END))]
+        clock = f(1, f(1, b"U" * 16) + f(2, f(1, n)) + f(2, f(1, 1)))
+        note = f(2, text) + b"".join(f(3, x) for x in subs) + f(4, clock) + b"".join(f(5, run(u16(t), **kw)) for t, kw in parts)
+        return gzip.compress(f(1, 0) + f(2, f(1, 0) + f(2, 0) + f(3, note)))
+
+    def recipe(self):
+        return self.note_with([("Recept\n", {}), ("\ufffc", dict(attachment=("T1", "com.apple.notes.table"))), ("\nZout", {})])
+
+    def edit(self, blob, paras, inline=None):
+        return an.edit_note_store(blob, paras, self.ME, 1790000000, lambda: b"C" * 16, inline_text=inline)
+
+    def attachment_ids(self, blob):
+        return [r.msg(12).str(1) for r in an.parse_note_store(blob).msgs(5) if r.msg(12)]
+
+    def test_table_is_kept_while_text_changes(self):
+        paras = [{"runs": [{"text": "Recept"}]}, {"runs": [{"attachment": "table"}]}, {"runs": [{"text": "Zout en peper"}]}]
+        blob, text, changed, info = self.edit(self.recipe(), paras)
+        self.assertTrue(changed)
+        self.assertEqual(text, "Recept\n\ufffc\nZout en peper")
+        self.assertEqual(self.attachment_ids(blob), ["T1"])
+        self.assertEqual(info, {"skippedAttachments": 0, "removedAttachments": 0})
+
+    def test_removed_table_is_deleted(self):
+        blob, text, _, info = self.edit(self.recipe(), [{"runs": [{"text": "Recept"}]}, {"runs": [{"text": "Zout"}]}])
+        self.assertEqual(text, "Recept\nZout")
+        self.assertEqual(self.attachment_ids(blob), [])
+        self.assertEqual(info["removedAttachments"], 1)
+
+    def test_new_image_is_skipped_not_invented(self):
+        paras = [{"runs": [{"text": "Recept"}]}, {"runs": [{"attachment": "table"}]},
+                 {"runs": [{"text": "Zout"}, {"attachment": "image"}]}]
+        blob, text, _, info = self.edit(self.recipe(), paras)
+        self.assertEqual(text, "Recept\n\ufffc\nZout")
+        self.assertEqual(info["skippedAttachments"], 1)
+
+    def test_hashtag_stays_a_hashtag(self):
+        blob0 = self.note_with([("Bake ", {}), ("\ufffc", dict(attachment=("H1", "com.apple.notes.inlinetextattachment.hashtag"))),
+                                (" now", {})])
+        inline = lambda ident, uti: "#italian" if ident == "H1" else None
+        blob, text, changed, _ = self.edit(blob0, [{"runs": [{"text": "Bake #italian now!"}]}], inline)
+        self.assertEqual(text, "Bake \ufffc now!")
+        self.assertEqual(self.attachment_ids(blob), ["H1"])
+
+    def test_formatting_only_change_counts(self):
+        blob0 = self.note_with([("Hello", {})])
+        _, _, changed, _ = self.edit(blob0, [{"runs": [{"text": "Hello"}]}])
+        self.assertFalse(changed)
+        _, _, changed, _ = self.edit(blob0, [{"runs": [{"text": "Hello", "bold": True}]}])
+        self.assertTrue(changed)

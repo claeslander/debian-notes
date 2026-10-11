@@ -470,7 +470,9 @@ def build_note_store(paragraphs, replica_uuid, timestamp, uuid_factory):
             ps += _fi(4, para["indent"])
         if style == STYLE_CHECKLIST:
             ps += _fb(5, _fb(1, uuid_factory()) + _fi(2, 1 if para.get("checked") else 0))
-        pieces = [r for r in para.get("runs") or [] if r.get("text")]
+        # A new note can't carry attachments: tables go as their text fallback, images are left out.
+        pieces = [dict(r, text=r.get("fallback", "")) if r.get("attachment") else r for r in para.get("runs") or []]
+        pieces = [r for r in pieces if r.get("text")]
         if i < len(paragraphs) - 1:
             if pieces:
                 pieces[-1] = dict(pieces[-1], text=pieces[-1]["text"] + "\n")
@@ -563,64 +565,119 @@ def _units(text):
     return [b[k:k + 2] for k in range(0, len(b), 2)]
 
 
-def _text_and_runs(paragraphs, timestamp, uuid_factory):
-    """Shared by build/edit: the note text and encoded attribute runs for a list of paragraphs."""
-    text_parts, runs = [], []
-    stamp = int(timestamp)
+FFFC_UNIT = OBJECT_REPLACEMENT.encode("utf-16-le")
+HEADING_STYLES = {STYLE_TITLE, STYLE_HEADING, STYLE_SUBHEADING}
+
+
+def _para_style(para, uuid_factory):
+    style = para.get("style")
+    ps = b""
+    if style is not None:
+        ps += _fi(1, style)
+    ps += _fi(3, 1)  # writing direction: left to right, as Apple writes it
+    if para.get("indent"):
+        ps += _fi(4, para["indent"])
+    if style == STYLE_CHECKLIST:
+        ps += _fb(5, _fb(1, uuid_factory()) + _fi(2, 1 if para.get("checked") else 0))
+    return ps
+
+
+def _sem(style, indent, checked, weight, underline, strike, link):
+    """What a run means, for deciding whether formatting changed (ignores ids and timestamps)."""
+    style = None if style in (None, -1, 3) else style
+    if style in HEADING_STYLES:
+        weight = 0  # headings are bold by definition
+    return (style, indent or 0, 1 if (style == STYLE_CHECKLIST and checked) else 0,
+            weight or 0, 1 if underline else 0, 1 if strike else 0, link or None)
+
+
+def _old_tokens(note, inline_text):
+    """One token per visible UTF-16 unit of the existing note. Attachments are single tokens: block ones
+    (tables, images, files) as "ATT", inline ones (hashtags, mentions, links) by the text they show."""
+    units = _units(note.str(2))
+    runs_at = []
+    for run in note.msgs(5):
+        runs_at.extend([run] * run.int(1))
+    runs_at.extend([Msg()] * (len(units) - len(runs_at)))
+    tokens = []
+    for i, u in enumerate(units):
+        run = runs_at[i]
+        ps = run.msg(2)
+        style = ps.int(1, -1) if ps and ps.has(1) else None
+        cl = ps.msg(5) if ps else None
+        sem = _sem(style, ps.int(4) if ps else 0, cl.int(2) if cl else 0, run.int(5), run.int(6), run.int(7), run.str(9))
+        if u == FFFC_UNIT:
+            info = run.msg(12)
+            alt = inline_text(info.str(1), info.str(2)) if (info and inline_text) else None
+            key = ("INL", alt) if alt else "ATT"
+            tokens.append({"key": key, "kind": "att", "unit": u, "run": run, "sem": ("ATT",) + sem[:2]})
+        else:
+            tokens.append({"key": u, "kind": "u", "unit": u, "sem": sem})
+    return tokens
+
+
+def _new_tokens(paragraphs, uuid_factory):
+    """Tokens for the edited content. Runs marked {"attachment": ...} stand for an existing attachment."""
+    tokens = []
     for i, para in enumerate(paragraphs):
-        style = para.get("style")
-        ps = b""
-        if style is not None:
-            ps += _fi(1, style)
-        ps += _fi(3, 1)
-        if para.get("indent"):
-            ps += _fi(4, para["indent"])
-        if style == STYLE_CHECKLIST:
-            ps += _fb(5, _fb(1, uuid_factory()) + _fi(2, 1 if para.get("checked") else 0))
-        pieces = [r for r in para.get("runs") or [] if r.get("text")]
-        if i < len(paragraphs) - 1:
-            if pieces:
-                pieces[-1] = dict(pieces[-1], text=pieces[-1]["text"] + "\n")
-            else:
-                pieces = [{"text": "\n"}]
-        for r in pieces:
-            t = r["text"].replace(OBJECT_REPLACEMENT, "")
-            if not t:
-                continue
-            body = _fi(1, len(t.encode("utf-16-le")) // 2) + _fb(2, ps)
+        ps = _para_style(para, uuid_factory)
+        style, indent, checked = para.get("style"), para.get("indent") or 0, para.get("checked")
+        for r in para.get("runs") or []:
             weight = (1 if r.get("bold") else 0) | (2 if r.get("italic") else 0)
-            if weight:
-                body += _fi(5, weight)
-            if r.get("underline"):
-                body += _fi(6, 1)
-            if r.get("strike"):
-                body += _fi(7, 1)
-            if r.get("link"):
-                body += _fb(9, r["link"])
-            body += _fi(13, stamp)
-            runs.append(body)
-            text_parts.append(t)
-    return "".join(text_parts), runs
+            sem = _sem(style, indent, checked, weight, r.get("underline"), r.get("strike"), r.get("link"))
+            spec = (ps, weight, bool(r.get("underline")), bool(r.get("strike")), r.get("link") or None)
+            if r.get("attachment"):
+                tokens.append({"key": "ATT", "kind": "att", "units": [], "spec": spec, "sem": ("ATT",) + sem[:2]})
+                continue
+            for u in _units(r.get("text", "").replace(OBJECT_REPLACEMENT, "")):
+                tokens.append({"key": u, "kind": "u", "units": [u], "spec": spec, "sem": sem})
+        if i < len(paragraphs) - 1:
+            sem = _sem(style, indent, checked, 0, 0, 0, None)
+            tokens.append({"key": _units("\n")[0], "kind": "u", "units": _units("\n"), "spec": (ps, 0, False, False, None), "sem": sem})
+    return tokens
 
 
-def edit_note_store(old_blob, paragraphs, replica_uuid, timestamp, uuid_factory):
-    """Apply the new content to an existing note as CRDT operations. Returns (blob, text, changed)."""
+def _match_inline(old, new):
+    """Where the page shows an inline attachment as plain text (#tag), fold those characters back into one
+    token so the diff keeps the attachment. Matched in order, each after the previous one."""
+    cursor = 0
+    for ot in old:
+        if not (isinstance(ot["key"], tuple) and ot["key"][0] == "INL"):
+            continue
+        want = _units(ot["key"][1])
+        n = len(want)
+        for p in range(cursor, len(new) - n + 1):
+            if all(new[p + k]["kind"] == "u" and new[p + k]["key"] == want[k] for k in range(n)):
+                new[p:p + n] = [{"key": ot["key"], "kind": "att", "units": want, "spec": new[p]["spec"],
+                                 "sem": ("ATT",) + new[p]["sem"][:2]}]
+                cursor = p + 1
+                break
+    return new
+
+
+def edit_note_store(old_blob, paragraphs, replica_uuid, timestamp, uuid_factory, inline_text=None):
+    """Apply the new content to an existing note as CRDT operations.
+
+    Attachments in the note (tables, images, files, hashtags, links) are kept where they are: the page sends
+    them as attachment markers (or, for inline ones, as their text) and they are matched as single tokens.
+    New attachments can't be created and are skipped; removed ones are deleted.
+    Returns (blob, text, changed, info)."""
     root = Msg(decompress(old_blob))
     doc = root.msg(2)
     note = doc.msg(3) if doc else None
     if note is None:
         raise ValueError("not a note document")
     old_text = note.str(2)
-    if OBJECT_REPLACEMENT in old_text:
-        raise ValueError("notes with attachments, tables or hashtags can't be edited yet")
     subs = _subs(note)
     order = _chain(subs)
     old_units = _units(old_text)
     if topotext_visible_length(note) != len(old_units):
         raise ValueError("note structure doesn't match its text")
 
-    new_text, runs = _text_and_runs(paragraphs, timestamp, uuid_factory)
-    new_units = _units(new_text)
+    old = _old_tokens(note, inline_text)
+    new = _match_inline(old, _new_tokens(paragraphs, uuid_factory))
+    stamp = int(timestamp)
+
     clocks = _clocks(note)
     idx = next((k for k, c in enumerate(clocks) if c[0] == replica_uuid), None)
     if idx is None:
@@ -633,13 +690,67 @@ def edit_note_store(old_blob, paragraphs, replica_uuid, timestamp, uuid_factory)
     import difflib
     keep = [True] * len(old_units)
     inserts = {}  # old visible index the text goes after (-1 = at the start) -> list of units
-    for op, a0, a1, b0, b1 in difflib.SequenceMatcher(None, old_units, new_units, autojunk=False).get_opcodes():
+    final = []    # (unit, run spec, meaning) in the new visible order
+    info = {"skippedAttachments": 0, "removedAttachments": 0}
+    for op, a0, a1, b0, b1 in difflib.SequenceMatcher(
+            None, [t["key"] for t in old], [t["key"] for t in new], autojunk=False).get_opcodes():
+        if op == "equal":
+            for ot, nt in zip(old[a0:a1], new[b0:b1]):
+                if ot["kind"] == "att":
+                    final.append((ot["unit"], ("ATT", nt["spec"][0], ot["run"]), ot["sem"][:1] + nt["sem"][1:]))
+                else:
+                    final.append((ot["unit"], nt["spec"], nt["sem"]))
+            continue
         if op in ("delete", "replace"):
             for k in range(a0, a1):
                 keep[k] = False
+                if old[k]["kind"] == "att":
+                    info["removedAttachments"] += 1
         if op in ("insert", "replace"):
-            inserts.setdefault(a1 - 1 if op == "replace" else a0 - 1, []).extend(new_units[b0:b1])
-    changed = bool(inserts) or not all(keep)
+            units = []
+            for nt in new[b0:b1]:
+                if nt["kind"] == "att" and not nt["units"]:
+                    info["skippedAttachments"] += 1  # a new image/table/file: can't be created in iCloud
+                    continue
+                units.extend(nt["units"])  # inline attachments that lost their match go in as plain text
+                final.extend((u, nt["spec"], nt["sem"] if nt["kind"] == "u" else _sem(None, 0, 0, 0, 0, 0, None))
+                             for u in nt["units"])
+            if units:
+                inserts.setdefault(a1 - 1 if op == "replace" else a0 - 1, []).extend(units)
+    new_units = [u for u, _, _ in final]
+    new_text = b"".join(new_units).decode("utf-16-le")
+    changed = bool(inserts) or not all(keep) or [m for _, _, m in final] != [t["sem"] for t in old]
+
+    # Attribute runs for the new text: neighbouring characters with the same formatting share a run;
+    # every attachment keeps its own run (with its original attachment reference).
+    runs = []
+    for unit, spec, _ in final:
+        if runs and spec[0] != "ATT" and runs[-1][1] == spec:
+            runs[-1][0] += 1
+        else:
+            runs.append([1, spec])
+    enc_runs = []
+    for length, spec in runs:
+        if spec[0] == "ATT":
+            _, ps, old_run = spec
+            body = _fi(1, 1) + _fb(2, ps)
+            if old_run.has(3):
+                body += _fb(3, old_run.bytes(3))
+            body += _fb(12, old_run.bytes(12)) + _fi(13, stamp)
+        else:
+            ps, weight, underline, strike, link = spec
+            body = _fi(1, length) + _fb(2, ps)
+            if weight:
+                body += _fi(5, weight)
+            if underline:
+                body += _fi(6, 1)
+            if strike:
+                body += _fi(7, 1)
+            if link:
+                body += _fb(9, link)
+            body += _fi(13, stamp)
+        enc_runs.append(body)
+    runs = enc_runs
 
     # Nodes of the new graph. Each original substring becomes one or more pieces (split where characters are
     # kept or deleted, or where text is inserted); pieces keep the original links between substrings, so
@@ -741,4 +852,4 @@ def edit_note_store(old_blob, paragraphs, replica_uuid, timestamp, uuid_factory)
     if check.str(2) != new_text or topotext_visible_length(check) != len(new_units) or \
             sum(r.int(1) for r in check.msgs(5)) != len(new_units):
         raise ValueError("edited note failed its consistency check")
-    return blob, new_text, changed
+    return blob, new_text, changed, info
