@@ -1,4 +1,4 @@
-// "Import from iCloud" — a guided, multi-step import screen.
+// "Import from iCloud": a guided, multi-step import screen.
 (function (N) {
   const I = (N.importer = {});
   const STEPS = ['welcome', 'signin', 'choose', 'import'];
@@ -196,7 +196,7 @@
     welcome: () => `
       ${hero()}
       <h1 class="imp-title">Import your iCloud Notes</h1>
-      <p class="imp-sub">Bring your notes, folders, checklists and tables from iCloud to this computer. They are read-only here — make a local copy of a note to edit it.</p>
+      <p class="imp-sub">Bring your notes, folders, checklists and tables from iCloud to this computer. They are read-only here. Make a local copy of a note to edit it.</p>
       <div class="imp-features">
         <div class="imp-feature">${tile('folder', '#f5b800')}<div><b>Folders and notes</b><span>Your folder structure comes along, with the original dates.</span></div></div>
         <div class="imp-feature">${tile('checklist', '#30c759')}<div><b>Formatting, checklists and tables</b><span>Titles, lists, ticked items and tables are kept.</span></div></div>
@@ -214,7 +214,7 @@
       <ol class="imp-howto">
         <li><span>1</span><div>Click <b>Open Apple Sign-In</b>.</div></li>
         <li><span>2</span><div>Sign in with your Apple ID, tick <b>Keep me signed in</b>, and enter the code that appears on your iPhone or Mac.</div></li>
-        <li><span>3</span><div>If Apple asks whether to trust this browser, choose <b>Trust</b> — you won't need a code next time.</div></li>
+        <li><span>3</span><div>If Apple asks whether to trust this browser, choose <b>Trust</b>, so you won't need a code next time.</div></li>
         <li><span>4</span><div>That's it. This screen continues on its own as soon as you're signed in.</div></li>
       </ol>
       ${st.notice ? `<div class="imp-notice">${esc(st.notice)}</div>` : ''}
@@ -254,11 +254,11 @@
         <div class="imp-options">
           <label><input type="checkbox" name="sync"${st.sync ? ' checked' : ''}><span>Keep in sync with iCloud<small>New and changed notes in these folders are downloaded automatically. Nothing is sent to iCloud.</small></span></label>
           <label><input type="checkbox" name="keepFolders"${st.keepFolders ? ' checked' : ''}><span>Keep my iCloud folders<small>Otherwise everything goes into one folder called “iCloud”.</small></span></label>
-          <label><input type="checkbox" name="skipExisting"${st.skipExisting ? ' checked' : ''}><span>Skip notes I've already imported<small>${p.alreadyImported ? `${p.alreadyImported} already here — changed ones are updated. Notes in Recently Deleted are restored.` : 'Changed notes are updated instead of duplicated.'}</small></span></label>
+          <label><input type="checkbox" name="skipExisting"${st.skipExisting ? ' checked' : ''}><span>Skip notes I've already imported<small>${p.alreadyImported ? `${p.alreadyImported} already here. Changed ones are updated. Notes in Recently Deleted are restored.` : 'Changed notes are updated instead of duplicated.'}</small></span></label>
           ${p.deleted ? `<label><input type="checkbox" name="includeDeleted"${st.includeDeleted ? ' checked' : ''}><span>Also import Recently Deleted<small>${p.deleted} ${p.deleted === 1 ? 'note goes' : 'notes go'} to Recently Deleted here too.</small></span></label>` : ''}
         </div>
         ${p.locked ? `<div class="imp-notice">${N.icon('lock')} ${p.locked} locked ${p.locked === 1 ? 'note is' : 'notes are'} skipped. Remove the lock on your iPhone to import ${p.locked === 1 ? 'it' : 'them'}.</div>` : ''}
-        ${n ? '' : `<div class="imp-uptodate">${N.icon('check')} Everything in these folders is already on this computer${st.sync ? ' — sync keeps it up to date' : ''}.</div>`}
+        ${n ? '' : `<div class="imp-uptodate">${N.icon('check')} Everything in these folders is already on this computer${st.sync ? ', and sync keeps it up to date' : ''}.</div>`}
         <div data-count hidden>${n}</div>`;
     },
 

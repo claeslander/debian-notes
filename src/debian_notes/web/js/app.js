@@ -85,7 +85,7 @@
     }
   };
 
-  const readOnlyToast = () => N.ui.toast('iCloud notes are read-only here — use Edit in iCloud or make a local copy');
+  const readOnlyToast = () => N.ui.toast('iCloud notes are read-only here. Use Edit in iCloud or make a local copy');
 
   function versionMenuItems(id = S.currentNoteId) {
     const n = id != null ? S.notes.get(id) : null;
@@ -534,7 +534,7 @@
     const f = S.folders.find((x) => x.id === folderId);
     const skipped = ids.length - movable.length;
     N.ui.toast(`Moved ${movable.length} ${movable.length === 1 ? 'note' : 'notes'} to “${f ? f.name : 'Notes'}”` +
-      (skipped ? ` — ${skipped} iCloud ${skipped === 1 ? 'note stays' : 'notes stay'} in iCloud's folders` : ''));
+      (skipped ? `. ${skipped} iCloud ${skipped === 1 ? 'note stays' : 'notes stay'} in iCloud's folders` : ''));
   };
 
   async function recoverSelected() {
@@ -619,7 +619,7 @@
 
   A.localCopy = async function (id = S.currentNoteId) {
     await A.duplicateNote(id);
-    N.ui.toast('Local copy made — you can edit this one');
+    N.ui.toast('Local copy made. You can edit this one');
   };
 
   A.emptyTrash = async function () {
@@ -1074,7 +1074,7 @@
           ${check('groupByDate', 'Group notes by date', S.settings.groupByDate !== false)}
           ${check('sortChecked', 'Sort checked items to the bottom', !!S.settings.sortChecked)}
           ${check('showCounts', 'Show note counts', S.settings.showCounts !== false)}
-          ${check('slashCommands', 'Slash commands — type / to format a line', !!S.settings.slashCommands)}
+          ${check('slashCommands', 'Slash commands: type / to format a line', !!S.settings.slashCommands)}
 
         </div></div>
         <div class="pref-row"><span>Locked notes:</span><div>

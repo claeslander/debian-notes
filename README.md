@@ -4,7 +4,7 @@
 
 # Notes for Debian
 
-**A fast, private notes app for Debian and other GTK desktops, in the style of Apple Notes —
+**A fast, private notes app for Debian and other GTK desktops, in the style of Apple Notes,
 with your iCloud notes right next to your local ones.**
 
 ![Notes for Debian, light appearance](assets/screenshots/light.png)
@@ -22,7 +22,7 @@ you need them.
 **Writing**
 
 - Title, Heading, Subheading, Body and Monostyled text; bold, italic, underline, strikethrough and colours
-- Bulleted, dashed and numbered lists, checklists, block quotes and indentation —
+- Bulleted, dashed and numbered lists, checklists, block quotes and indentation:
   `* `, `- `, `1. ` and `[] ` start a list as you type
 - Tables with rows and columns you add, remove and Tab through
 - Images, file attachments and sketches; drag and drop or paste them in
@@ -57,12 +57,12 @@ you need them.
 
 ## iCloud and Local
 
-A switch at the top left — or <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd> — moves between two places:
+A switch at the top left (or <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd>) moves between two places:
 
 - **iCloud** (where the app opens): your iCloud notes, in iCloud Notes on the web, shown inside the app
   window. You sign in once on Apple's own sign-in page; after that the app opens straight into your notes.
   Everything you change there is saved to iCloud by Apple and shows up on your iPhone, iPad and Mac.
-- **Local**: notes that live only on this computer — folders, tags, the full editor, and nothing sent anywhere.
+- **Local**: notes that live only on this computer: folders, tags, the full editor, and nothing sent anywhere.
 
 > [!NOTE]
 > With **Advanced Data Protection** turned on, iCloud.com can't open your notes until you allow it: on your

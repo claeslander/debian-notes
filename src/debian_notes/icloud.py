@@ -1284,7 +1284,7 @@ def _size(n):
 
 
 def _shape(records):
-    """Record types and field names only (no content) — written to the import log for troubleshooting."""
+    """Record types and field names only (no content), written to the import log for troubleshooting."""
     shape = {}
     for r in records:
         t = r.get("recordType") or ("<deleted>" if r.get("deleted") else "?")

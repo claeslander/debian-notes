@@ -177,7 +177,7 @@
   // ------------------------------------------------------------------ sheets
 
   // UI.sheet({title, message, icon, fields:[{name,label,type,value,placeholder}], buttons:[{label,value,primary,danger}]})
-  // resolves to {button, values} — button is null when cancelled with Escape.
+  // resolves to {button, values}; button is null when cancelled with Escape.
   UI.sheet = function (opts) {
     UI.closeTransient();
     return new Promise((resolve) => {

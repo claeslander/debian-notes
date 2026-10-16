@@ -76,7 +76,7 @@
       const marker = doc.createElement('span');
       marker.className = 'nt-missing';
       marker.setAttribute('data-kind', name);
-      marker.textContent = `${name} not included — iCloud doesn't copy attachments`;
+      marker.textContent = `${name} not included: iCloud doesn't copy attachments`;
       span.replaceWith(marker);
     });
     // Paragraph styles -> headings, code and lists (consecutive list paragraphs are grouped).
