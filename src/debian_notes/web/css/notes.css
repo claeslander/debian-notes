@@ -161,7 +161,10 @@ body.resizing, body.resizing * { cursor: col-resize !important; }
 /* iCloud view (prototype): iCloud Notes on the web takes the place of the list and the editor. */
 #icloud-pane { display: none; flex: 1; min-width: 0; flex-direction: column; background: var(--editor-bg); }
 #icloud-area { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px; align-items: center;
-  justify-content: center; color: var(--secondary); font-size: 13px; background: no-repeat 0 0 / 100% 100%; }
+  justify-content: center; color: var(--secondary); font-size: 13px; }
+/* A picture of iCloud in the live view's exact place while a sheet or menu of the page is open over it. */
+#icloud-freeze { position: fixed; z-index: 50; pointer-events: none; }
+#icloud-freeze[hidden] { display: none; }
 .toolbar.icloud-toolbar { padding: 0; border-bottom: 1px solid var(--divider); }
 .toolbar.icloud-side { width: var(--sidebar-w); flex: none; border: 0; background: none; }
 .icloud-more { margin-right: 10px; }
@@ -868,7 +871,7 @@ body.no-transparency .toast { background: #28282a; }
   }
   @page { margin: 0; }  /* margins come from the page setup (A4, 20 mm) */
   html, body { height: auto; overflow: visible; background: #fff !important; }
-  #sidebar, #list-pane, .divider, .toolbar, #table-tools, #trash-banner, #icloud-banner, #icloud-pane, #overlay-root,
+  #sidebar, #list-pane, .divider, .toolbar, #table-tools, #trash-banner, #icloud-banner, #icloud-pane, #icloud-freeze, #overlay-root,
   .locked-view, .empty-view, #multi-view { display: none !important; }
   #app { display: block; height: auto; background: #fff !important; }
   #editor-pane { display: block !important; background: #fff; }

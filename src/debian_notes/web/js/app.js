@@ -609,10 +609,15 @@
   };
 
   // Called by Python with the picture (or null when there is none, e.g. while iCloud is still loading).
-  A.icloudFrozen = async function (url) {
+  A.icloudFrozen = async function (url, rect) {
     if (url) {
       icloudFrozen = true;
-      document.getElementById('icloud-area').style.backgroundImage = `url("${url}?${Date.now()}")`;
+      // Exactly where (and as large as) the live view is, so nothing shifts when they swap.
+      const img = document.getElementById('icloud-freeze');
+      Object.assign(img.style, { left: rect.left + 'px', top: rect.top + 'px', width: rect.width + 'px', height: rect.height + 'px' });
+      img.src = `${url}?${Date.now()}`;
+      await img.decode().catch(() => {});
+      img.hidden = false;
       await nextFrame();
     }
     await N.call('hideICloudWeb').catch(() => {});
@@ -624,7 +629,9 @@
   function unfreeze() {
     if (!icloudFrozen) return;
     icloudFrozen = false;
-    document.getElementById('icloud-area').style.backgroundImage = '';
+    const img = document.getElementById('icloud-freeze');
+    img.hidden = true;
+    img.removeAttribute('src');
     N.call('forgetFrozenICloud').catch(() => {});
   }
 
@@ -660,7 +667,8 @@
 
   function showLive() {
     const r = document.getElementById('icloud-area').getBoundingClientRect();
-    const box = { left: r.left, top: r.top, right: window.innerWidth - r.right, bottom: window.innerHeight - r.bottom };
+    const box = { left: r.left, top: r.top, right: window.innerWidth - r.right, bottom: window.innerHeight - r.bottom,
+      pageWidth: window.innerWidth };
     N.call('showICloudWeb', box, pendingICloudUrl).catch(() => {});
     pendingICloudUrl = null;
     icloudWebShown = true;
@@ -1314,7 +1322,7 @@
     const visible = (el) => el.offsetParent !== null && el.getBoundingClientRect().width > 0;
     const areas = overlayOpen ? [] : N.$$('.toolbar').filter(visible).map(rect);
     const exclude = N.$$('.toolbar button, .toolbar input, .tb-search, .segmented, .traffic').filter(visible).map(rect);
-    N.send('setDragRegions', { areas, exclude });
+    N.send('setDragRegions', { areas, exclude, width: window.innerWidth });  // width: page pixels to screen pixels
   }
   const updateDragRegionsSoon = N.debounce(updateDragRegions, 60);
 

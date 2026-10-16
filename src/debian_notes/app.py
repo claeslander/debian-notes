@@ -616,10 +616,11 @@ class NotesWindow(Gtk.ApplicationWindow):
     def show_icloud_web(self, box, url=None):
         """Lay iCloud Notes on the web over the page area in `box` (CSS pixels from each window edge)."""
         view = self._icloud_view(url)
-        view.set_margin_start(max(0, int(box.get("left", 0))))
-        view.set_margin_top(max(0, int(box.get("top", 0))))
-        view.set_margin_end(max(0, int(box.get("right", 0))))
-        view.set_margin_bottom(max(0, int(box.get("bottom", 0))))
+        scale = self._css_scale = self.css_scale(box.get("pageWidth"))  # box is in page pixels
+        view.set_margin_start(max(0, round(box.get("left", 0) * scale)))
+        view.set_margin_top(max(0, round(box.get("top", 0) * scale)))
+        view.set_margin_end(max(0, round(box.get("right", 0) * scale)))
+        view.set_margin_bottom(max(0, round(box.get("bottom", 0) * scale)))
         self.icloud_wanted = True
         # While loading it is shown fully transparent: iCloud only draws some parts (tables, images) on a
         # visible page, and it appears all at once when done.
@@ -668,9 +669,14 @@ class NotesWindow(Gtk.ApplicationWindow):
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(fd, "wb") as fh:
                     surface.write_to_png(fh)
-                # The page shows the picture and then asks to hide the live view (hideICloudWeb).
-                self.eval_js(f"N.app.icloudFrozen({json.dumps(GLib.filename_to_uri(path))})")
-            except (GLib.Error, OSError):
+                # The page shows the picture exactly where the live view is, then asks to hide it (hideICloudWeb).
+                a = v.get_allocation()
+                x, y = v.translate_coordinates(self.webview, 0, 0) or (a.x, a.y)
+                s = getattr(self, "_css_scale", 1.0)  # screen pixels to page pixels
+                rect = {"left": x / s, "top": y / s, "width": a.width / s, "height": a.height / s}
+                self.eval_js(f"N.app.icloudFrozen({json.dumps(GLib.filename_to_uri(path))}, {json.dumps(rect)})")
+            except Exception:  # never leave the page waiting: then it just hides the live view
+                traceback.print_exc()
                 self.eval_js("N.app.icloudFrozen(null)")
 
         view.get_snapshot(WebKit2.SnapshotRegion.VISIBLE, WebKit2.SnapshotOptions.NONE, None, done)
@@ -733,10 +739,19 @@ class NotesWindow(Gtk.ApplicationWindow):
 
     # ------------------------------------------------------- window dragging
 
+    def css_scale(self, page_width):
+        """Screen pixels per page pixel. Not always 1: WebKit follows GNOME's text scaling (e.g. 1.04), so the
+        page's coordinates must be converted before comparing them with GTK's."""
+        alloc = self.webview.get_allocated_width()
+        return alloc / page_width if page_width and alloc > 1 else 1.0
+
     def _in_drag_area(self, x, y):
+        regions = self.drag_regions or {}
+        scale = self.css_scale(regions.get("width"))
+        x, y = x / scale, y / scale  # the regions are in page pixels
+
         def inside(r):
             return r[0] <= x < r[0] + r[2] and r[1] <= y < r[1] + r[3]
-        regions = self.drag_regions or {}
         return any(inside(r) for r in regions.get("areas", [])) and not any(
             inside(r) for r in regions.get("exclude", [])
         )
