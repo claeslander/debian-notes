@@ -57,9 +57,9 @@ you need them.
 
 ## iCloud and Local
 
-A switch at the top left (or <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd>) moves between two places:
+A switch at the top left (or <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd>, or <kbd>Ctrl</kbd>+<kbd>Tab</kbd>) moves between two places:
 
-- **iCloud** (where the app opens): your iCloud notes, in iCloud Notes on the web, shown inside the app
+- **iCloud** (where the app opens once you've signed in): your iCloud notes, in iCloud Notes on the web, shown inside the app
   window. You sign in once on Apple's own sign-in page; after that the app opens straight into your notes.
   Everything you change there is saved to iCloud by Apple and shows up on your iPhone, iPad and Mac.
 - **Local**: notes that live only on this computer: folders, tags, the full editor, and nothing sent anywhere.
@@ -98,7 +98,7 @@ packaging/install-local.sh        # add it to your app grid (--uninstall to remo
 | --- | --- |
 | New note / new folder | <kbd>Ctrl</kbd>+<kbd>N</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>N</kbd> |
 | Search | <kbd>Ctrl</kbd>+<kbd>F</kbd> |
-| iCloud / Local | <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd> |
+| iCloud / Local | <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd>, or <kbd>Ctrl</kbd>+<kbd>Tab</kbd> |
 | Title / Heading / Subheading / Body | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>T</kbd> / <kbd>H</kbd> / <kbd>J</kbd> / <kbd>B</kbd> |
 | Checklist / mark as checked | <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>L</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>U</kbd> |
 | Table | <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>T</kbd> |
@@ -106,6 +106,7 @@ packaging/install-local.sh        # add it to your app grid (--uninstall to remo
 | Select all notes | <kbd>Ctrl</kbd>+<kbd>A</kbd> (in the note list) |
 | Undo / redo (notes) | <kbd>Ctrl</kbd>+<kbd>Z</kbd> / <kbd>Ctrl</kbd>+<kbd>Shift</kbd>+<kbd>Z</kbd> |
 | List / gallery view | <kbd>Ctrl</kbd>+<kbd>1</kbd> / <kbd>Ctrl</kbd>+<kbd>2</kbd> |
+| Quit | <kbd>Ctrl</kbd>+<kbd>Q</kbd> |
 
 The full list is under ⋯ → *Keyboard Shortcuts*.
 

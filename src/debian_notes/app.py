@@ -69,6 +69,7 @@ class Api:
             "windowActive": self.win.is_active(),
             "rounded": self.win.rounded,
             "maximized": self.win.is_maximized(),
+            "icloudConfigured": self.win.icloud_configured(),
         }
 
     def log(self, *parts):
@@ -553,6 +554,8 @@ class NotesWindow(Gtk.ApplicationWindow):
             except GLib.Error:
                 return
             if state:
+                if not self.store.get_setting("icloud.configured"):
+                    self.store.set_setting("icloud.configured", True)  # signed in: the app opens on iCloud from now on
                 # The notes are there; wait until iCloud stops building the page (list, note, tables): its
                 # requests never settle (it keeps polling for changes), so look at what is drawn.
                 self._icloud_settle = self._icloud_settle + 1 if state == self._icloud_last else 0
@@ -569,9 +572,21 @@ class NotesWindow(Gtk.ApplicationWindow):
         self.icloud_ready = True
         self.icloud_view.set_opacity(1)
 
+    def icloud_configured(self):
+        """Whether iCloud has been set up: its notes were shown once, or a signed-in session is already saved.
+        Until then the app opens on Local."""
+        if self.store.get_setting("icloud.configured"):
+            return True
+        try:
+            with open(os.path.join(self.store.data_dir, "icloud-web", "session.json"), encoding="utf-8") as fh:
+                return "X-APPLE-WEBAUTH-TOKEN" in json.load(fh)
+        except (OSError, ValueError, TypeError):
+            return False
+
     def preload_icloud_web(self):
-        """Start loading iCloud Notes on the web while the app itself starts (it opens on iCloud)."""
-        self._icloud_view()
+        """Start loading iCloud Notes on the web while the app itself starts, when it opens on iCloud."""
+        if self.icloud_configured():
+            self._icloud_view()
         return False
 
     def show_icloud_web(self, box, url=None):
@@ -588,9 +603,18 @@ class NotesWindow(Gtk.ApplicationWindow):
         view.show()
 
     def _on_key_press(self, _widget, event):
-        """Ctrl+Left / Ctrl+Right: switch between iCloud (left of the switch) and Local (right)."""
+        """Ctrl+Left / Ctrl+Right: switch between iCloud (left of the switch) and Local (right).
+        Ctrl+Tab (with or without Shift): switch to the other one. Ctrl+Q: quit."""
         mods = event.state & Gtk.accelerator_get_default_mod_mask()
-        if mods != Gdk.ModifierType.CONTROL_MASK or event.keyval not in (Gdk.KEY_Left, Gdk.KEY_Right):
+        ctrl = Gdk.ModifierType.CONTROL_MASK
+        if mods == ctrl and event.keyval in (Gdk.KEY_q, Gdk.KEY_Q):
+            self.close()  # same way as the close button: the open note is saved first
+            return True
+        if event.keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab, Gdk.KEY_KP_Tab) and mods in (ctrl, ctrl | Gdk.ModifierType.SHIFT_MASK):
+            mode = "local" if self.mode == "icloud" else "icloud"
+            self.eval_js(f"window.N && N.app && N.app.setMode('{mode}')")
+            return True
+        if mods != ctrl or event.keyval not in (Gdk.KEY_Left, Gdk.KEY_Right):
             return False
         mode = "icloud" if event.keyval == Gdk.KEY_Left else "local"
         if mode == self.mode:

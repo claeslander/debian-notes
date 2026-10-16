@@ -1118,7 +1118,7 @@
       ['Dashed list', 'Ctrl+Shift+8'], ['Numbered list', 'Ctrl+Shift+9'], ['Block quote', "Ctrl+'"],
       ['Table', 'Ctrl+Alt+T'], ['Indent / outdent', 'Ctrl+] / Ctrl+['], ['Bold / italic / underline', 'Ctrl+B / I / U'],
       ['Paste and match style', 'Ctrl+Shift+V'], ['List / gallery view', 'Ctrl+1 / Ctrl+2'],
-      ['Bigger / smaller text', 'Ctrl+= / Ctrl+-'], ['iCloud / Local', 'Ctrl+← / Ctrl+→'],
+      ['Bigger / smaller text', 'Ctrl+= / Ctrl+-'], ['iCloud / Local', 'Ctrl+← / Ctrl+→, or Ctrl+Tab'], ['Quit', 'Ctrl+Q'],
       ['Command menu (enable in Settings)', '/'],
     ];
     N.ui.sheet({
@@ -1368,9 +1368,10 @@
     window.addEventListener('resize', updateDragRegionsSoon);
     new MutationObserver(updateDragRegionsSoon).observe(document.getElementById('overlay-root'), { childList: true });
 
-    // The app opens on iCloud, before anything is drawn: the local notes must not flash first.
+    // The app opens on iCloud once that is set up (Local before), and chooses before anything is drawn:
+    // the local notes must not flash first.
     S.scope = { type: 'local' };
-    await A.setMode('icloud');
+    await A.setMode(data.icloudConfigured ? 'icloud' : 'local');
     N.sidebar.render();
     N.notelist.render();
     const last = S.settings.lastNote;
