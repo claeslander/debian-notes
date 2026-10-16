@@ -45,6 +45,7 @@
     textSub: S('<text x="12" y="16" text-anchor="middle" font-size="10.5" font-weight="700" fill="currentColor" stroke="none" font-family="sans-serif">H2</text>'),
     textBody: S('<path d="M5 7h14M5 12h14M5 17h9"/>'),
     textMono: S('<path d="M9 7l-5 5 5 5M15 7l5 5-5 5"/>'),
+    computer: S('<rect x="3.5" y="4.5" width="17" height="11.5" rx="2"/><path d="M9 20h6M12 16v4"/>'),
     cloud: S('<path d="M7 18h10.5a4.5 4.5 0 0 0 .6-8.96A6 6 0 0 0 6.6 10.1 4 4 0 0 0 7 18z"/>'),
     cloudDown: S('<path d="M7 18h10.5a4.5 4.5 0 0 0 .6-8.96A6 6 0 0 0 6.6 10.1 4 4 0 0 0 7 18z"/><path d="M12 10.5v5M9.8 13.6l2.2 2.2 2.2-2.2"/>'),
     cloudUp: S('<path d="M7 18h10.5a4.5 4.5 0 0 0 .6-8.96A6 6 0 0 0 6.6 10.1 4 4 0 0 0 7 18z"/><path d="M12 15.8v-5M9.8 12.7l2.2-2.2 2.2 2.2"/>'),

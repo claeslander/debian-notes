@@ -191,7 +191,7 @@ class PullSyncTest(ImporterConversionTest):
         stats = self.sync(touched=["N1"])
         self.assertEqual(stats["removed"], 1)
         self.assertIsNotNone(self.store.note_row(nid)["deleted_at"])
-        self.assertIsNone(self.note())  # no longer tracked: nothing left in iCloud to push
+        self.assertIsNone(self.note())  # no longer tracked
 
     def test_tombstone_goes_to_trash(self):
         self.sync(full=True)
@@ -211,6 +211,93 @@ class PullSyncTest(ImporterConversionTest):
         self.assertIn("Pasta & Risotto", names)
         self.assertNotIn("Pasta", names)
 
+    def test_deleted_here_stays_deleted(self):
+        self.sync(full=True)
+        nid = self.note()["id"]
+        self.store.trash_note(nid)
+        self.imp.records["N1"] = bump(self.imp.records["N1"], [("Again\n", {})])
+        stats = self.sync(touched=["N1"])
+        self.assertEqual((stats["added"], stats["updated"]), (0, 0))
+        row = self.store.note_row(nid)
+        self.assertIsNotNone(row["deleted_at"])
+        self.assertIn("Focaccia", row["body"])
+        # Recovered later: the change that arrived in the meantime is picked up on the next pull.
+        self.store.recover_note(nid)
+        self.assertEqual(self.sync()["updated"], 1)
+        self.assertIn("Again", self.store.note_row(nid)["body"])
+
+    def test_local_notes_are_never_touched(self):
+        self.sync(full=True)
+        mine = self.store.create_note(self.store.default_folder_id(), body="<h1>Mine</h1>")
+        before = dict(self.store.note_row(mine["id"]))
+        self.imp.records["N1"] = bump(self.imp.records["N1"], [("Focaccia v2\n", dict(style=0))])
+        self.sync(touched=["N1"], full=True)
+        self.assertEqual(dict(self.store.note_row(mine["id"])), before)
+        self.assertFalse(self.store.note_meta(mine["id"])["icloud"])
+
+    def test_icloud_notes_are_marked(self):
+        self.sync(full=True)
+        nid = self.note()["id"]
+        self.assertTrue(self.store.is_icloud(nid))
+        self.assertTrue(self.store.note_meta(nid)["icloud"])
+        copy = self.store.duplicate_note(nid)  # "Make Local Copy": editable, not tracked
+        self.assertFalse(copy["icloud"])
+        self.assertTrue(self.store.note_meta(nid)["icloud"])
+
+    def test_old_local_edits_become_a_local_note(self):
+        # An older version let you edit iCloud notes; such edits are kept as a local note on the next pull.
+        self.sync(full=True)
+        local = self.note()
+        self.store.db.execute("UPDATE notes SET body = '<h1>Mine</h1>', plain = 'Mine', updated_at = ? WHERE id = ?",
+                              (local["updated_at"] + 100, local["id"]))
+        stats = self.sync()
+        self.assertEqual(stats["conflicts"], 1)
+        self.assertFalse(self.store.is_icloud(local["id"]))
+        self.assertEqual(self.store.note_row(local["id"])["body"], "<h1>Mine</h1>")
+        self.assertIn("Focaccia", self.note()["body"])
+
+    def copy_of(self, name, new_name, text_parts=None, modified=1700000000000):
+        rec = bump(self.imp.records[name], text_parts, modified=modified)
+        rec["recordName"] = new_name
+        rec["fields"]["CreationDate"] = self.imp.records[name]["fields"]["CreationDate"]
+        rec["fields"]["TitleEncrypted"] = self.imp.records[name]["fields"]["TitleEncrypted"]
+        self.imp.records[new_name] = rec
+        return rec
+
+    def live(self):
+        return [n for n in self.store.notes() if not n["deletedAt"]]
+
+    def test_conflict_copies_in_icloud_are_shown_once(self):
+        # Apple's conflict copies: same creation date and title, same modification date as the original.
+        self.sync(full=True)
+        original = self.note()["id"]
+        self.copy_of("N1", "N1-COPY-A")
+        self.copy_of("N1", "N1-COPY-B")
+        stats = self.sync(touched=["N1-COPY-A", "N1-COPY-B"])
+        self.assertEqual((stats["added"], stats["copies"]), (0, 0))
+        self.assertEqual([n["id"] for n in self.live()], [original])  # the one imported first stays
+        self.assertEqual(self.sync(full=True)["added"], 0)            # and pulling again adds nothing
+
+    def test_copies_already_imported_are_removed(self):
+        self.sync(full=True)
+        self.copy_of("N1", "N1-COPY")
+        self.imp._copies = lambda: set()  # as before this fix: the copy got imported as a separate note
+        self.sync(touched=["N1-COPY"])
+        self.assertEqual(len(self.live()), 2)
+        del self.imp._copies
+        stats = self.sync()
+        self.assertEqual(stats["copies"], 1)
+        self.assertEqual(len(self.live()), 1)
+        self.assertTrue(self.note("N1"))  # the original stays
+
+    def test_newest_version_wins_among_copies(self):
+        self.sync(full=True)
+        self.copy_of("N1", "N1-NEWER", [("Focaccia v3\n", dict(style=0))], modified=1800000000000)
+        self.sync(touched=["N1-NEWER"])
+        live = self.live()
+        self.assertEqual(len(live), 1)
+        self.assertIn("Focaccia v3", self.store.note_row(live[0]["id"])["body"])
+
     def test_permanently_deleted_here_stays_deleted(self):
         self.sync(full=True)
         self.store.delete_note(self.note()["id"])
@@ -218,153 +305,29 @@ class PullSyncTest(ImporterConversionTest):
         self.assertEqual(self.sync(touched=["N1"], full=True)["added"], 0)
 
 
+class WebLinkTest(unittest.TestCase):
+    def test_web_note_url(self):
+        # The address iCloud.com itself uses for a note (seen in its address bar).
+        self.assertEqual(icloud.web_note_url("777D9AE3-2433-4882-853B-84119C0F34D1"),
+                         "https://www.icloud.com/notes/note/"
+                         "UHJpdmF0ZTo6Tm90ZXM6OmN1cnJlbnRVc2VyOjo3NzdEOUFFMy0yNDMzLTQ4ODItODUzQi04NDExOUMwRjM0RDE=")
+
+
+class CacheTest(unittest.TestCase):
+    def test_cache_keeps_its_sync_token(self):
+        # Regression: loading the cache lazily used to drop the token, forcing a full resync.
+        import json as _json
+        with tempfile.TemporaryDirectory() as tmp:
+            imp = object.__new__(icloud.ICloudImporter)
+            imp.cache_path = tmp + "/c.json"
+            with open(imp.cache_path, "w") as fh:
+                _json.dump({"token": "TOKEN-1", "records": {"X": {"recordName": "X"}}}, fh)
+            imp.records, imp.token = imp._load_cache()
+            self.assertEqual((imp.token, list(imp.records)), ("TOKEN-1", ["X"]))
+            imp._save_cache()
+            with open(imp.cache_path) as fh:
+                self.assertEqual(_json.load(fh)["token"], "TOKEN-1")
+
+
 if __name__ == "__main__":
     unittest.main()
-
-
-class FakeCloud:
-    """Stands in for CloudClient: keeps records in memory, applies creates/updates like CloudKit."""
-
-    def __init__(self, records):
-        self.records = {r["recordName"]: dict(r, recordChangeTag="t1") for r in records}
-        self.ops = []
-
-    def lookup(self, names):
-        return [self.records[n] if n in self.records else {"recordName": n, "serverErrorCode": "NOT_FOUND"} for n in names]
-
-    def notes_records(self, on_progress, cancelled, token=None):
-        return list(self.records.values()), "TOKEN-2"
-
-    def modify(self, ops):
-        for op in ops:
-            r = op["record"]
-            self.ops.append((op["operationType"], r["recordName"], sorted(r.get("fields", {}))))
-            if op["operationType"] == "update":
-                cur = self.records[r["recordName"]]
-                assert r.get("recordChangeTag") == cur["recordChangeTag"], "stale change tag"
-                cur["fields"] = dict(cur["fields"], **r["fields"])
-                cur["recordChangeTag"] = "t%d" % (int(cur["recordChangeTag"][1:]) + 1)
-            else:
-                self.records[r["recordName"]] = dict(r, recordChangeTag="t1")
-        return [op["record"] for op in ops]
-
-
-class PushChangesTest(unittest.TestCase):
-    def setUp(self):
-        from debian_notes import applenotes as an
-        self.an = an
-        self.tmp = tempfile.TemporaryDirectory()
-        self.store = Store(self.tmp.name)
-        blob, _ = an.build_note_store([{"style": 0, "runs": [{"text": "Pasta"}]}, {"style": None, "runs": [{"text": "zout"}]}],
-                                      b"U" * 16, 1700000000, lambda: b"C" * 16)
-        rec = {"recordName": "N1", "recordType": "Note", "fields": {
-            "TitleEncrypted": enc("Pasta"), "TextDataEncrypted": enc(blob), "Folder": ref("DefaultFolder-CloudKit"),
-            "ModificationDate": {"value": 1700000000000, "type": "TIMESTAMP"}}}
-        self.cloud = FakeCloud([rec])
-        imp = object.__new__(icloud.ICloudImporter)
-        imp.store, imp.client, imp.records, imp.token, imp.busy = self.store, self.cloud, {}, None, False
-        imp.cache_path, imp.log_path = self.tmp.name + "/c.json", self.tmp.name + "/l.json"
-        imp._ensure_client = lambda: None
-        self.imp = imp
-        self.nid = self.store.save_imported_note("icloud", "N1", self.store.default_folder_id(),
-                                                 {"title": "Pasta", "body": "<h1>Pasta</h1><div>zout</div>"}, 1700000000.0, 1700000000.0)
-        self.store.commit()
-
-    def tearDown(self):
-        self.store.close()
-        self.tmp.cleanup()
-
-    def paras(self, *lines):
-        return {"paragraphs": [{"style": 0 if i == 0 else None, "runs": [{"text": t}]} for i, t in enumerate(lines)]}
-
-    def test_send_changes(self):
-        res = self.imp._push_changes(self.nid, self.paras("Pasta", "zout en peper"))
-        self.assertEqual((res["ok"], res["verified"]), (True, True))
-        self.assertEqual(self.cloud.ops[-1][0], "update")
-        stored = icloud.rec_bytes(self.cloud.records["N1"], "TextDataEncrypted")
-        self.assertEqual(self.an.plain_text(self.an.parse_note_store(stored)), "Pasta\nzout en peper")
-        reasons = [v["reason"] for v in self.store.versions(self.nid)]
-        self.assertIn("before-push", reasons)
-        # Pull sync now sees the local copy as in sync (no false conflict).
-        st = self.store.import_state("icloud")["N1"]
-        self.assertGreaterEqual(st["modified"], st["updated_at"])
-        # Nothing changed -> nothing sent.
-        n_ops = len(self.cloud.ops)
-        self.assertTrue(self.imp._push_changes(self.nid, self.paras("Pasta", "zout en peper"))["unchanged"])
-        self.assertEqual(len(self.cloud.ops), n_ops)
-
-    def test_refuses_when_changed_on_iphone(self):
-        self.cloud.records["N1"]["fields"]["ModificationDate"] = {"value": 1800000000000, "type": "TIMESTAMP"}
-        with self.assertRaises(RuntimeError):
-            self.imp._push_changes(self.nid, self.paras("Pasta", "mine"))
-        self.assertEqual(self.cloud.ops, [])
-
-    def test_push_sends_local_deletions(self):
-        self.store.trash_note(self.nid)  # "delete is just delete" — no prompt; Push sends it later
-        self.imp.sync_config = lambda: {"keepFolders": True}
-        cands = self.imp.sync_candidates()
-        self.assertEqual([d["id"] for d in cands["deleted"]], [self.nid])
-        stats = {"changed": [], "sent": 0, "created": 0, "skipped": 0}
-        self.imp._push_outgoing({"deleted": [self.nid]}, stats)
-        self.assertEqual(stats["deleted"], 1)
-        self.assertEqual(self.cloud.records["N1"]["fields"]["Folder"]["value"]["recordName"], "TrashFolder-CloudKit")
-        self.assertEqual(self.imp.sync_candidates()["deleted"], [])  # not sent twice
-
-    def test_push_pulls_first_and_skips_notes_changed_on_both_sides(self):
-        self.imp._set_sync_state = lambda *a, **k: None
-        self.imp.sync_config = lambda: {"enabled": True, "keepFolders": True, "folders": None}
-        # Edited here…
-        self.store.db.execute("UPDATE notes SET body = '<h1>Pasta</h1><div>mine</div>', updated_at = updated_at + 100 WHERE id = ?", (self.nid,))
-        self.store.commit()
-        # …and on the iPhone.
-        from debian_notes import applenotes as an
-        blob, _ = an.build_note_store([{"style": 0, "runs": [{"text": "Pasta"}]}, {"style": None, "runs": [{"text": "theirs"}]}],
-                                      b"U" * 16, 1800000000, lambda: b"C" * 16)
-        self.cloud.records["N1"]["fields"]["TextDataEncrypted"] = enc(blob)
-        self.cloud.records["N1"]["fields"]["ModificationDate"] = {"value": 1800000000000, "type": "TIMESTAMP"}
-        self.imp._sync()                      # the internal pull of Push
-        cands = self.imp.sync_candidates()    # compared with the fresh state
-        self.assertEqual(cands["edited"], [])  # not pushed over the iPhone's version
-        bodies = [self.store.note_row(n["id"])["body"] for n in self.store.notes() if not n["deletedAt"]]
-        self.assertTrue(any("mine" in b for b in bodies) and any("theirs" in b for b in bodies))  # both kept
-
-    def test_deleted_in_icloud_is_not_pushed_again(self):
-        self.imp._set_sync_state = lambda *a, **k: None
-        self.imp.sync_config = lambda: {"enabled": True, "keepFolders": True, "folders": None}
-        self.imp._sync()  # first pull: everything known
-        del self.cloud.records["N1"]  # deleted on the iPhone (gone from the zone)
-        self.cloud.notes_records = lambda *a, **k: ([{"recordName": "N1", "deleted": True}], "TOKEN-3")
-        self.imp._sync()
-        self.assertIsNotNone(self.store.note_row(self.nid)["deleted_at"])  # mirrored to Recently Deleted
-        self.assertEqual(self.imp.sync_candidates()["deleted"], [])          # and not offered for Push again
-        self.assertNotIn("N1", self.store.import_state("icloud"))
-
-    def test_cache_keeps_its_sync_token(self):
-        # Regression: loading the cache lazily (e.g. for a push) used to drop the token, forcing a full resync.
-        import json as _json
-        with open(self.imp.cache_path, "w") as fh:
-            _json.dump({"token": "TOKEN-1", "records": {"X": {"recordName": "X"}}}, fh)
-        self.imp.records, self.imp.token = None, None
-        self.imp._ensure_cache()
-        self.assertEqual((self.imp.token, list(self.imp.records)), ("TOKEN-1", ["X"]))
-        self.imp._save_cache()
-        with open(self.imp.cache_path) as fh:
-            self.assertEqual(_json.load(fh)["token"], "TOKEN-1")
-
-    def test_push_trash_never_wipes_the_cache(self):
-        # Regression: pushing a deletion with the cache not loaded saved an empty cache over the real one.
-        import json as _json
-        with open(self.imp.cache_path, "w") as fh:
-            _json.dump({"token": "TOKEN-1", "records": {"N1": self.cloud.records["N1"], "Other": {"recordName": "Other"}}}, fh)
-        self.imp.records, self.imp.token = None, None
-        self.imp._push_trash([self.nid])
-        with open(self.imp.cache_path) as fh:
-            saved = _json.load(fh)
-        self.assertEqual((saved["token"], sorted(saved["records"])), ("TOKEN-1", ["Other"]))
-
-    def test_move_to_recently_deleted(self):
-        self.store.delete_note(self.nid)  # already gone locally (deleted from Recently Deleted)
-        res = self.imp._push_trash([self.nid])
-        self.assertEqual(res["trashed"], 1)
-        self.assertEqual(self.cloud.records["N1"]["fields"]["Folder"]["value"]["recordName"], "TrashFolder-CloudKit")
-        self.assertNotIn("N1", self.store.import_state("icloud"))  # sync won't bring it back

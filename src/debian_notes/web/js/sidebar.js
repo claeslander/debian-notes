@@ -1,15 +1,18 @@
-// Folder sidebar: account section, nested folders, Recently Deleted and the tag browser.
+// Folder sidebar (Local mode): local notes, nested folders, Recently Deleted and the tag browser.
+// iCloud notes live in the iCloud mode and are left out here.
 (function (N) {
   const SB = (N.sidebar = {});
   const S = () => N.state;
 
-  const scopeKey = (scope) => scope.type + (scope.id !== undefined ? ':' + scope.id : '') + (scope.tag ? ':' + scope.tag : '');
+  const scopeKey = (scope) => scope.type + (scope.id !== undefined ? ':' + scope.id : '') + (scope.tag ? ':' + scope.tag : '') +
+    (scope.ids ? ':' + scope.ids.join(',') : '');
 
   function counts() {
-    const c = { all: 0, trash: 0, folders: {}, tags: {} };
+    const c = { local: 0, trash: 0, folders: {}, tags: {} };
     for (const n of S().notes.values()) {
+      if (n.icloud) continue;
       if (n.deletedAt) { c.trash++; continue; }
-      c.all++;
+      c.local++;
       c.folders[n.folderId] = (c.folders[n.folderId] || 0) + 1;
       for (const t of n.tags) c.tags[t] = (c.tags[t] || 0) + 1;
     }
@@ -31,11 +34,13 @@
 
   function row({ scope, icon, label, count, depth = 0, hasChildren = false, collapsed = false, draggable = false, folder }) {
     const key = scopeKey(scope);
-    const active = scopeKey(S().scope) === key && !S().search;
+    const cur = S().scope;
+    const multi = cur.type === 'folders' && !!folder && cur.ids.includes(folder.id);
+    const active = (scopeKey(cur) === key || multi) && !S().search;
     const disclosure = hasChildren
       ? `<span class="sb-disclosure${collapsed ? '' : ' open'}" data-toggle="${folder.id}">${N.icon('disclosure')}</span>`
       : '<span class="sb-disclosure"></span>';
-    return `<div class="sb-row${active ? ' active' : ''}" data-scope="${N.esc(key)}" style="--depth:${depth}"` +
+    return `<div class="sb-row${active ? ' active' : ''}${active && multi ? ' multi' : ''}" data-scope="${N.esc(key)}" style="--depth:${depth}"` +
       `${draggable ? ' draggable="true"' : ''}${folder ? ` data-folder="${folder.id}"` : ''}>` +
       `${disclosure}<span class="sb-icon">${N.icon(icon)}</span>` +
       `<span class="sb-label">${N.esc(label)}</span>` +
@@ -52,9 +57,11 @@
     html += `<div class="sb-section"><div class="sb-header" data-drop-root>` +
       `<span>On My Computer</span><span class="sb-header-toggle${sectionCollapsed ? '' : ' open'}" data-section-toggle>${N.icon('chevronDown')}</span></div>`;
     if (!sectionCollapsed) {
-      html += row({ scope: { type: 'all' }, icon: 'allNotes', label: 'All on My Computer', count: c.all });
+      html += row({ scope: { type: 'local' }, icon: 'computer', label: 'Local', count: c.local });
+      // Folders made by an iCloud pull only show up while they hold local notes.
+      const used = (f) => !f.icloud || c.folders[f.id] || (tree.get(f.id) || []).some(used);
       const walk = (parentKey, depth) => {
-        for (const f of tree.get(parentKey) || []) {
+        for (const f of (tree.get(parentKey) || []).filter(used)) {
           const kids = tree.has(f.id);
           html += row({
             scope: { type: 'folder', id: f.id }, icon: 'folder', label: f.name, count: c.folders[f.id], depth,
@@ -86,11 +93,13 @@
   };
 
   function parseScope(key) {
-    if (key === 'all' || key === 'trash' || key === 'alltags') return { type: key };
+    if (key === 'all') return { type: 'local' };  // the All view is gone
+    if (['local', 'trash', 'alltags'].includes(key)) return { type: key };
     const [type, ...rest] = key.split(':');
     if (type === 'folder') return { type, id: +rest[0] };
+    if (type === 'folders') return { type, ids: rest[0].split(',').map(Number) };
     if (type === 'tag') return { type, tag: rest.join(':') };
-    return { type: 'all' };
+    return { type: 'local' };
   }
 
   SB.parseScope = parseScope;
@@ -127,6 +136,33 @@
 
   // -------------------------------------------------------------- events
 
+  // ------------------------------------------------------ multi-selection
+
+  let anchor = null;  // folder a Shift+click range starts from
+
+  SB.selectedFolders = function () {
+    const sc = S().scope;
+    return sc.type === 'folders' ? sc.ids.slice() : sc.type === 'folder' ? [sc.id] : [];
+  };
+
+  // Shift+click selects the range of visible folders from the anchor; Ctrl+click adds or removes one.
+  function selectFolders(id, range) {
+    const order = N.$$('#sidebar-scroll .sb-row[data-folder]').map((r) => +r.dataset.folder);
+    let ids;
+    if (range) {
+      const from = order.indexOf(anchor ?? SB.selectedFolders()[0] ?? id);
+      const to = order.indexOf(id);
+      ids = from === -1 ? [id] : order.slice(Math.min(from, to), Math.max(from, to) + 1);
+    } else {
+      const set = new Set(SB.selectedFolders());
+      if (set.has(id)) set.delete(id); else set.add(id);
+      ids = order.filter((x) => set.has(x));
+      anchor = id;
+    }
+    if (!ids.length) return;
+    N.app.setScope(ids.length === 1 ? { type: 'folder', id: ids[0] } : { type: 'folders', ids });
+  }
+
   SB.init = function () {
     const scroll = document.getElementById('sidebar-scroll');
 
@@ -146,7 +182,15 @@
         return;
       }
       const target = e.target.closest('[data-scope]');
-      if (target && !e.target.closest('.sb-rename')) N.app.setScope(parseScope(target.dataset.scope));
+      if (!target || e.target.closest('.sb-rename')) return;
+      const folderId = target.dataset.folder ? +target.dataset.folder : null;
+      if (folderId != null && (e.shiftKey || N.isMod(e))) { selectFolders(folderId, e.shiftKey); return; }
+      if (folderId != null) anchor = folderId;
+      N.app.setScope(parseScope(target.dataset.scope));
+    });
+
+    scroll.addEventListener('mousedown', (e) => {
+      if (e.shiftKey && e.target.closest('.sb-row[data-folder]')) e.preventDefault();  // no text selection
     });
 
     scroll.addEventListener('dblclick', (e) => {
@@ -158,6 +202,14 @@
       e.preventDefault();
       const r = e.target.closest('.sb-row[data-folder]');
       const items = [{ label: 'New Folder', action: () => N.app.newFolder() }];
+      const chosen = SB.selectedFolders();
+      if (r && chosen.length > 1 && chosen.includes(+r.dataset.folder)) {
+        const deletable = chosen.filter((id) => !(S().folders.find((x) => x.id === id) || {}).isDefault);
+        N.ui.menu([
+          { label: `Delete ${deletable.length} Folders`, danger: true, disabled: !deletable.length, action: () => N.app.deleteFolders(deletable) },
+        ], e.clientX, e.clientY);
+        return;
+      }
       if (r) {
         const f = S().folders.find((x) => x.id === +r.dataset.folder);
         items.push({ label: 'New Subfolder', action: () => N.app.newFolder(f.id) });
@@ -179,7 +231,10 @@
     scroll.addEventListener('dragstart', (e) => {
       const r = e.target.closest('.sb-row[data-folder]');
       if (!r) return;
-      e.dataTransfer.setData('application/x-notes-folder', r.dataset.folder);
+      const id = +r.dataset.folder;
+      const chosen = SB.selectedFolders();
+      const ids = chosen.length > 1 && chosen.includes(id) ? chosen : [id];
+      e.dataTransfer.setData('application/x-notes-folder', ids.join(','));
       e.dataTransfer.effectAllowed = 'move';
     });
 
@@ -208,17 +263,21 @@
       const noteId = e.dataTransfer.getData('application/x-notes-note');
       const folderId = e.dataTransfer.getData('application/x-notes-folder');
       if (noteId) {
-        if (t.dataset.scope === 'trash') N.app.deleteNote(+noteId);
-        else if (t.dataset.folder) N.app.moveNote(+noteId, +t.dataset.folder);
+        const ids = noteId.split(',').map(Number);
+        if (t.dataset.scope === 'trash') N.app.deleteNotes(ids);
+        else if (t.dataset.folder) N.app.moveNotes(ids, +t.dataset.folder);
       } else if (folderId) {
         const parent = t.hasAttribute('data-drop-root') ? null : t.dataset.folder ? +t.dataset.folder : undefined;
-        if (parent === undefined || parent === +folderId) return;
-        try {
-          S().folders = await N.call('moveFolder', +folderId, parent);
-          N.app.refresh();
-        } catch (err) {
-          N.ui.toast(err.message);
+        if (parent === undefined) return;
+        for (const id of folderId.split(',').map(Number)) {
+          if (id === parent) continue;
+          try {
+            S().folders = await N.call('moveFolder', id, parent);
+          } catch (err) {
+            N.ui.toast(err.message);
+          }
         }
+        N.app.refresh();
       }
     });
   };

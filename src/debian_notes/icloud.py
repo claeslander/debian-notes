@@ -23,8 +23,6 @@ from . import applenotes as an
 
 SOURCE = "icloud"
 FOLDER_SOURCE = "icloud-folder"
-PUSH_SOURCE = "icloud-push"  # records this app created in iCloud (for the test push feature)
-PUSH_FOLDER_NAME = "From Debian"
 USER_AGENT = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
               "(KHTML, like Gecko) Version/17.5 Safari/605.1.15")
 CLIENT_PARAMS = {"clientBuildNumber": "2420Hotfix12", "clientMasteringNumber": "2420Hotfix12"}
@@ -221,25 +219,6 @@ class CloudClient:
             if not z.get("moreComing"):
                 return records, token
 
-    def _db_url(self, op):
-        return f"{self.ck_url}/database/1/com.apple.notes/production/private/records/{op}"
-
-    def modify(self, operations):
-        """Run CloudKit record operations; raises with Apple's reason when one fails."""
-        res = self._request(self._db_url("modify"), body={"operations": operations, "zoneID": NOTES_ZONE, "atomic": True},
-                            params=dict(CLIENT_PARAMS, clientId=self.client_id, dsid=self.dsid))
-        records = res.get("records") or []
-        failed = [r for r in records if r.get("serverErrorCode")]
-        if failed:
-            raise RuntimeError("iCloud refused the change: " + "; ".join(
-                f"{r.get('serverErrorCode')} {r.get('reason') or ''}".strip() for r in failed))
-        return records
-
-    def lookup(self, names):
-        res = self._request(self._db_url("lookup"), body={"records": [{"recordName": n} for n in names], "zoneID": NOTES_ZONE},
-                            params=dict(CLIENT_PARAMS, clientId=self.client_id, dsid=self.dsid))
-        return res.get("records") or []
-
     def download(self, asset, filename="file"):
         url = asset["downloadURL"].replace("${f}", urllib.parse.quote(filename or "file"))
         return self._request(url, raw=True, timeout=180)
@@ -307,6 +286,34 @@ class SignInWindow(Gtk.Window):
         self.show_all()
 
 
+def web_note_url(record_name):
+    """iCloud.com's own address for one of the user's notes."""
+    key = base64.b64encode(f"Private::Notes::currentUser::{record_name}".encode()).decode()
+    return f"https://www.icloud.com/notes/note/{key}"
+
+
+class WebNotesWindow(Gtk.Window):
+    """iCloud Notes on the web, signed in with the app's own iCloud session: where iCloud notes are edited."""
+
+    def __init__(self, parent, session, on_close):
+        super().__init__(title="iCloud Notes", transient_for=parent, destroy_with_parent=True)
+        self.set_default_size(1100, 760)
+        self.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        header = Gtk.HeaderBar(title="iCloud Notes", subtitle="Your changes come back when you close this window")
+        header.set_show_close_button(True)
+        self.set_titlebar(header)
+        self.view = WebKit2.WebView.new_with_context(session.context)
+        self.view.get_settings().set_user_agent(USER_AGENT)
+        self.view.connect("create", lambda view, action: (view.load_request(action.get_request()), None)[1])
+        self.add(self.view)
+        self.connect("destroy", lambda *_: on_close())
+        self.show_all()
+
+    def open(self, url):
+        self.view.load_uri(url)
+        self.present()
+
+
 # ----------------------------------------------------------------------- importer
 
 
@@ -322,6 +329,7 @@ class ICloudImporter:
         self.account = None
         self.records = None
         self.signin_window = None
+        self.web_window = None
         self.checking = False
         self.cancel_event = threading.Event()
         self.log_path = os.path.join(data_dir, "icloud-import-log.json")
@@ -443,6 +451,26 @@ class ICloudImporter:
         self.signin_window = SignInWindow(self.win, self.session, self._signin_closed)
         GLib.timeout_add_seconds(2, self._poll_signin)
 
+    def note_url(self, note_id):
+        """iCloud.com's address of the iCloud note behind a local note."""
+        name = next((n for n, st in self.store.import_state(SOURCE).items() if st["note_id"] == note_id and st["present"]),
+                    None)
+        if name is None:
+            raise ValueError("This note isn't in iCloud.")
+        return web_note_url(name)
+
+    def open_note_on_web(self, note_id):
+        """Open an iCloud note in its own iCloud Notes window to edit it there; pull when the window closes."""
+        url = self.note_url(note_id)
+        if self.web_window is None:
+            self.web_window = WebNotesWindow(self.win, self.session, self._web_closed)
+        self.web_window.open(url)
+
+    def _web_closed(self):
+        self.web_window = None
+        # iCloud.com saves while you type; give the last change a moment to arrive, then bring it here.
+        GLib.timeout_add_seconds(3, lambda: (self.sync_now(quiet=True), False)[1])
+
     def _poll_signin(self):
         if not self.signin_window:
             return False
@@ -509,6 +537,26 @@ class ICloudImporter:
     def _notes(self):
         return [r for r in self.records.values() if r.get("recordType") == "Note"]
 
+    def _copies(self):
+        """Record names of Apple's conflict copies. When versions of a note clash, Notes keeps them as extra
+        notes with the original's creation date and title. Only one of each group is shown here: the newest,
+        or on a tie the one imported here first; the others are skipped."""
+        imported = self._on_main(lambda: {k: v["note_id"] for k, v in self.store.import_state(SOURCE).items()
+                                          if v["present"]})
+        groups = {}
+        for rec in self._notes():
+            created = ((rec.get("fields") or {}).get("CreationDate") or {}).get("value")
+            if not created or self._is_deleted(rec) or self._is_locked(rec):
+                continue
+            groups.setdefault((created, rec_text(rec, "TitleEncrypted", "Title") or ""), []).append(rec)
+        copies = set()
+        for recs in groups.values():
+            if len(recs) > 1:
+                recs.sort(key=lambda r: (-rec_time(r, "ModificationDate", "modified"),
+                                         imported.get(r["recordName"], float("inf")), r["recordName"]))
+                copies.update(r["recordName"] for r in recs[1:])
+        return copies
+
     def _note_folder(self, rec):
         fid = rec_ref(rec, "Folder", "Folders")
         if not fid:
@@ -549,7 +597,10 @@ class ICloudImporter:
         counts, new_counts, deleted, already = {}, {}, 0, 0
         locked = sum(1 for r in self.records.values()
                      if r.get("recordType") == "PasswordProtectedNote" and not rec_int(r, "Deleted"))
+        copies = self._copies()
         for rec in self._notes():
+            if rec["recordName"] in copies:
+                continue
             if self._is_deleted(rec):
                 deleted += 1
                 continue
@@ -603,10 +654,11 @@ class ICloudImporter:
         pinned = {rec_ref(r, "Note") for r in self.records.values()
                   if r.get("recordType") == "Note_UserSpecific" and rec_int(r, "IsPinned")}
 
+        copies = self._copies()
         todo = []
         for rec in self._notes():
             deleted = self._is_deleted(rec)
-            if self._is_locked(rec) or (deleted and not include_deleted):
+            if self._is_locked(rec) or (deleted and not include_deleted) or rec["recordName"] in copies:
                 continue
             if not deleted and chosen and self._note_folder(rec) not in chosen:
                 continue
@@ -735,8 +787,8 @@ class ICloudImporter:
         self.sync_now(quiet=True)
         return True
 
-    def sync_now(self, quiet=False, outgoing=None):
-        """Pull from iCloud; with `outgoing` (local edits/new notes, prepared by the page) also push."""
+    def sync_now(self, quiet=False):
+        """Pull from iCloud. Nothing is ever sent."""
         if self.busy:
             return
         self.busy = True
@@ -744,7 +796,7 @@ class ICloudImporter:
 
         def run():
             try:
-                self._sync(outgoing)
+                self._sync()
             except NotSignedIn:
                 self.client = None
                 self._set_sync_state("signin-needed", message="Sign in to iCloud to keep syncing.")
@@ -815,12 +867,6 @@ class ICloudImporter:
             raise NotSignedIn()
         self.client = client
 
-    def _ensure_cache(self):
-        """Load the record cache together with its sync token (never one without the other)."""
-        if self.records is None:
-            records, token = self._load_cache()
-            self.records, self.token = (records or {}), (token if records is not None else None)
-
     def _load_cache(self):
         try:
             with open(self.cache_path, encoding="utf-8") as fh:
@@ -840,7 +886,7 @@ class ICloudImporter:
         except OSError:
             pass
 
-    def _sync(self, outgoing=None):
+    def _sync(self):
         self._ensure_client()
         if self.records is None:
             self.records, self.token = self._load_cache()
@@ -890,12 +936,13 @@ class ICloudImporter:
 
         stats = self._apply_changes(touched_notes | content_notes, content_notes, removed, full)
         self._save_cache()
-        if outgoing:
-            self._push_outgoing(outgoing, stats)
         self._log({"sync": stats})
         self._set_sync_state("idle", last=time.time(), changes=stats)
 
     def _apply_changes(self, touched, force_content, removed, full):
+        """Mirror iCloud into the local copies of iCloud notes. Those copies are read-only here, so a pull
+        never overwrites anything local: notes made here are never touched, and an iCloud note deleted
+        here stays deleted."""
         cfg = self.sync_config()
         keep_folders = cfg.get("keepFolders", True)
         allowed = set(cfg["folders"]) if cfg.get("folders") else None
@@ -903,13 +950,28 @@ class ICloudImporter:
         folders = self._folders()
         pinned = {rec_ref(r, "Note") for r in self.records.values()
                   if r.get("recordType") == "Note_UserSpecific" and rec_int(r, "IsPinned")}
-        stats = {"added": 0, "updated": 0, "removed": 0, "moved": 0, "conflicts": 0, "folders": 0,
+        stats = {"added": 0, "updated": 0, "removed": 0, "moved": 0, "conflicts": 0, "copies": 0, "folders": 0,
                  "notes": 0, "tables": 0, "attachments": 0, "skippedAttachments": 0, "failed": 0, "changed": []}
         ops = []
 
+        copies = self._copies()
         candidates = set(touched) | set(removed)
+        # Every note in iCloud that isn't here yet: also picks up one that a sync missed, or a copy that
+        # becomes the one shown when the note it duplicated is deleted.
+        candidates |= {r["recordName"] for r in self._notes() if r["recordName"] not in state}
         if full:
             candidates |= {r["recordName"] for r in self._notes()}
+        candidates |= {name for name in copies if name in state}
+        for name, st in state.items():
+            if not st["present"] or st["deleted_at"]:
+                continue
+            rec = self.records.get(name)
+            # Changes that arrived while the note sat in Recently Deleted here (then recovered), and copies
+            # edited here by an older version of the app, when iCloud notes were still editable.
+            if rec is not None and rec_time(rec, "ModificationDate", "modified") > (st["modified"] or 0) + 1:
+                candidates.add(name)
+            if (st["updated_at"] or 0) > (st["modified"] or 0) + 1:
+                candidates.add(name)
         self._progress = [0, len(candidates)]
         for name in candidates:
             rec = self.records.get(name)
@@ -917,6 +979,11 @@ class ICloudImporter:
             if rec is not None and (rec.get("recordType") != "Note" or self._is_locked(rec)):
                 continue
             gone = rec is None or self._is_deleted(rec)
+            if name in copies:
+                # A conflict copy of a note that is already here: don't show it twice.
+                if st is not None and st["present"] and not st["deleted_at"]:
+                    ops.append(("copy", name, st["note_id"]))
+                continue
             if st is None:
                 # Not imported yet: pick up new notes in the synced folders.
                 if gone or (allowed is not None and self._note_folder(rec) not in allowed):
@@ -925,27 +992,28 @@ class ICloudImporter:
                 continue
             if not st["present"]:
                 continue  # deleted permanently on this computer: respect that
+            if st["deleted_at"]:
+                if gone:
+                    ops.append(("forget", name))
+                continue  # in Recently Deleted here: leave it alone
             edited_here = (st["updated_at"] or 0) > (st["modified"] or 0) + 1
             if gone:
-                # Deleted in iCloud: mirror it (unless edited here) and stop tracking — there is nothing
-                # left in iCloud for a later Push to delete.
-                ops.append(("forget", name) if st["deleted_at"] else ("detach" if edited_here else "trash", name, st["note_id"]))
+                # Deleted in iCloud: mirror it and stop tracking. A copy edited here stays as a local note.
+                ops.append(("detach" if edited_here else "trash", name, st["note_id"]))
                 continue
             remote_modified = rec_time(rec, "ModificationDate", "modified")
-            if remote_modified > (st["modified"] or 0) + 1 or name in force_content:
+            if edited_here or remote_modified > (st["modified"] or 0) + 1 or name in force_content:
                 item = self._item(rec, stats, keep_folders, pinned)
-                if edited_here and item is not None:
-                    # Only a real conflict when the local text actually differs from the new iCloud text.
-                    local_plain = self._on_main(lambda nid=st["note_id"]: self.store.note_row(nid)["plain"])
-                    if _same_text(local_plain, item["data"]["plain"]):
-                        edited_here = False
+                if item is None:
+                    continue
                 if edited_here:
-                    ops.append(("conflict", name, st["note_id"], item))
-                else:
-                    item["previous"] = st["note_id"]
-                    ops.append(("update", item, bool(st["deleted_at"])))
-                continue
-            if st["deleted_at"]:
+                    local_plain = self._on_main(lambda nid=st["note_id"]: self.store.note_row(nid)["plain"])
+                    if not _same_text(local_plain, item["data"]["plain"]):
+                        # Edited here: those edits become a local note, the iCloud version a new copy.
+                        ops.append(("conflict", name, st["note_id"], item))
+                        continue
+                item["previous"] = st["note_id"]
+                ops.append(("update", item))
                 continue
             ops.append(("meta", st["note_id"], self._note_folder(rec), keep_folders, name in pinned, st))
 
@@ -964,37 +1032,33 @@ class ICloudImporter:
                         self.store.db.execute("UPDATE notes SET pinned = 1 WHERE id = ?", (nid,))
                     stats["added"] += 1
                 elif kind == "update":
-                    item, was_trashed = op[1], op[2]
-                    if item is None:
-                        continue
+                    item = op[1]
                     fid = self._resolve_folder(item["folder"], folders, keep_folders, stats)
-                    self.store.snapshot_current(item["previous"], "before-sync")
                     nid = self.store.save_imported_note(SOURCE, item["id"], fid, item["data"], item["created"],
                                                         item["modified"], note_id=item["previous"])
-                    self.store.db.execute("UPDATE notes SET folder_id = ?, pinned = ?, deleted_at = NULL WHERE id = ?",
+                    self.store.db.execute("UPDATE notes SET folder_id = ?, pinned = ? WHERE id = ?",
                                           (fid, 1 if item["pinned"] else 0, nid))
                     stats["updated"] += 1
                     stats["changed"].append(nid)
                 elif kind == "conflict":
-                    name, local_id, item = op[1], op[2], op[3]
-                    if item is None:
-                        continue
-                    # Keep the version edited here as a normal local note; the iCloud version becomes a new note.
+                    name, item = op[1], op[3]
                     self.store.forget_import(SOURCE, name)
                     fid = self._resolve_folder(item["folder"], folders, keep_folders, stats)
-                    item["data"]["title"] = item["data"].get("title", "")
                     self.store.save_imported_note(SOURCE, item["id"], fid, item["data"], item["created"],
                                                   item["modified"])
                     stats["conflicts"] += 1
                 elif kind == "trash":
                     self.store.db.execute("UPDATE notes SET deleted_at = ?, pinned = 0 WHERE id = ?", (now, op[2]))
                     self.store.forget_import(SOURCE, op[1])
-                    self.store.forget_import(PUSH_SOURCE, op[1])
                     stats["removed"] += 1
+                    stats["changed"].append(op[2])
+                elif kind == "copy":
+                    self.store.db.execute("UPDATE notes SET deleted_at = ?, pinned = 0 WHERE id = ?", (now, op[2]))
+                    self.store.forget_import(SOURCE, op[1])
+                    stats["copies"] += 1
                     stats["changed"].append(op[2])
                 elif kind == "forget":
                     self.store.forget_import(SOURCE, op[1])
-                    self.store.forget_import(PUSH_SOURCE, op[1])
                 elif kind == "detach":
                     self.store.forget_import(SOURCE, op[1])
                 elif kind == "meta":
@@ -1010,491 +1074,6 @@ class ICloudImporter:
 
         self._on_main(apply)
         return stats
-
-    # ---------------------------------------------------- test push (experimental)
-
-    def push_note(self, note_id, payload):
-        """Create a new iCloud note from a local one, in the "From Debian" folder. Never edits existing notes."""
-        if self.busy:
-            self._emit_push(note_id, ok=False, message="iCloud sync is running. Try again in a few seconds.")
-            return
-        self.busy = True
-
-        def run():
-            try:
-                self._emit_push(note_id, **self._push(note_id, payload))
-            except NotSignedIn:
-                self.client = None
-                self._emit_push(note_id, ok=False, signin=True, message="Sign in to iCloud first.")
-            except Exception as exc:
-                traceback.print_exc()
-                self._log({"push_error": repr(exc), "trace": traceback.format_exc()})
-                self._emit_push(note_id, ok=False, message=str(exc))
-            finally:
-                self.busy = False
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _emit_push(self, note_id, **result):
-        payload = json.dumps(dict(result, noteId=note_id))
-        GLib.idle_add(lambda: (self.win.eval_js(f"window.N && N.sync && N.sync.onPush({payload})"), False)[1])
-
-    def _push(self, note_id, payload, folder=None):
-        self._ensure_client()
-        state = self._on_main(lambda: self.store.import_state(SOURCE))
-        if any(st["note_id"] == note_id and st["present"] for st in state.values()):
-            return {"ok": False, "message": "This note already exists in iCloud."}
-        paragraphs = payload.get("paragraphs") or []
-        if not any(r.get("text", "").strip() for p in paragraphs for r in p.get("runs", [])):
-            return {"ok": False, "message": "This note is empty."}
-
-        folder = folder or self._push_folder()
-        now = time.time()
-        record_name = str(uuid.uuid4()).upper()
-        blob, text = an.build_note_store(paragraphs, uuid.uuid4().bytes, now, lambda: uuid.uuid4().bytes)
-        summary = an.summarize(text)
-        enc = lambda b: {"value": base64.b64encode(b if isinstance(b, bytes) else b.encode()).decode(), "type": "ENCRYPTED_BYTES"}
-        ms = int(now * 1000)
-        ref = {"recordName": folder, "action": "VALIDATE"}
-        record = {
-            "recordName": record_name, "recordType": "Note",
-            "fields": {
-                "TitleEncrypted": enc(summary["title"]),
-                "SnippetEncrypted": enc(summary["snippet"]),
-                "TextDataEncrypted": enc(blob),
-                "Folder": {"value": ref, "type": "REFERENCE"},
-                "Folders": {"value": [ref], "type": "REFERENCE_LIST"},
-                "CreationDate": {"value": ms, "type": "TIMESTAMP"},
-                "ModificationDate": {"value": ms, "type": "TIMESTAMP"},
-                "FoldersModificationDate": {"value": ms, "type": "TIMESTAMP"},
-                "Deleted": {"value": 0, "type": "INT64"},
-                "AttachmentViewType": {"value": 0, "type": "INT64"},
-                "PaperStyleType": {"value": 0, "type": "INT64"},
-                "MinimumSupportedNotesVersion": {"value": 0, "type": "INT64"},
-            },
-        }
-        self._log({"push": record_name, "paragraphs": len(paragraphs), "chars": len(text)})
-        self.client.modify([{"operationType": "create", "record": record}])
-
-        # Read it back and check iCloud stored exactly what we sent.
-        back = self.client.lookup([record_name])
-        verified = False
-        if back and not back[0].get("serverErrorCode"):
-            data = rec_bytes(back[0], "TextDataEncrypted")
-            verified = bool(data) and an.plain_text(an.parse_note_store(data)) == text
-            self._ensure_cache()
-            self.records[record_name] = back[0]
-        remote_modified = rec_time(back[0], "ModificationDate", "modified") if back else now
-
-        def remember():
-            row = self.store.note_row(note_id)
-            self.store.set_mapping(PUSH_SOURCE, record_name, note_id)
-            # Track it like an imported note so pull sync brings iPhone edits back; the local copy counts
-            # as unedited from this moment.
-            self.store.db.execute(
-                "INSERT INTO imports (source, external_id, note_id, modified) VALUES (?, ?, ?, ?)"
-                " ON CONFLICT(source, external_id) DO UPDATE SET note_id = excluded.note_id, modified = excluded.modified",
-                (SOURCE, record_name, note_id, max(remote_modified, row["updated_at"])))
-            self.store.commit()
-
-        self._on_main(remember)
-        self._save_cache()
-        self._log({"push_done": record_name, "verified": verified})
-        return {"ok": True, "verified": verified, "folder": PUSH_FOLDER_NAME}
-
-    def _background(self, note_id, work):
-        """Run a push-type operation in a worker thread and report it through N.sync.onPush."""
-        if self.busy:
-            self._emit_push(note_id, ok=False, message="iCloud sync is running. Try again in a few seconds.")
-            return
-        self.busy = True
-
-        def run():
-            try:
-                self._emit_push(note_id, **work())
-            except NotSignedIn:
-                self.client = None
-                self._emit_push(note_id, ok=False, signin=True, message="Sign in to iCloud first.")
-            except Exception as exc:
-                traceback.print_exc()
-                self._log({"push_error": repr(exc), "trace": traceback.format_exc()})
-                self._emit_push(note_id, ok=False, message=str(exc))
-            finally:
-                self.busy = False
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _tracked(self, note_id):
-        """(record name, import state) of the iCloud note this local note mirrors, or (None, None)."""
-        state = self._on_main(lambda: self.store.import_state(SOURCE))
-        for name, st in state.items():
-            if st["note_id"] == note_id and st["present"]:
-                return name, st
-        return None, None
-
-    def _replica(self):
-        """This app's stable replica id in Apple's note CRDT."""
-        def get():
-            value = self.store.get_setting("icloud.replica")
-            if not value:
-                value = base64.b64encode(uuid.uuid4().bytes).decode()
-                self.store.set_setting("icloud.replica", value)
-            return value
-        return base64.b64decode(self._on_main(get))
-
-    def _fresh_record(self, name, st):
-        """Latest server copy of a tracked note; refuses when it changed since the last sync."""
-        back = self.client.lookup([name])
-        if not back or back[0].get("serverErrorCode"):
-            raise RuntimeError("This note no longer exists in iCloud.")
-        rec = back[0]
-        if rec_time(rec, "ModificationDate", "modified") > (st["modified"] or 0) + 1:
-            raise RuntimeError("This note changed in iCloud since the last sync. Sync first, then send your changes.")
-        if self._is_locked(rec):
-            raise RuntimeError("Locked notes can't be sent.")
-        return rec
-
-    def push_changes(self, note_id, payload):
-        """Send local edits of an iCloud note back as CRDT operations (experimental)."""
-        self._background(note_id, lambda: self._push_changes(note_id, payload))
-
-    def _push_changes(self, note_id, payload):
-        self._ensure_client()
-        name, st = self._tracked(note_id)
-        if name is None:
-            return {"ok": False, "message": "This note isn't in iCloud yet. Use “Send to iCloud” first."}
-        rec = self._fresh_record(name, st)
-        old_blob = rec_bytes(rec, "TextDataEncrypted")
-        if not old_blob:
-            raise RuntimeError("iCloud returned this note without its text.")
-        now = time.time()
-        blob, text, changed, info = an.edit_note_store(old_blob, payload.get("paragraphs") or [], self._replica(), now,
-                                                       lambda: uuid.uuid4().bytes, inline_text=self.inline_display)
-        if not changed:
-            self._mark_in_sync(note_id, name, rec_time(rec, "ModificationDate", "modified"))
-            return {"ok": True, "unchanged": True}
-
-        # Version history: what iCloud had, and what we are about to send.
-        before_html = an.note_to_html(an.parse_note_store(old_blob))
-        before_title = rec_text(rec, "TitleEncrypted") or ""
-        self._on_main(lambda: (
-            self.store.add_version(note_id, "before-push", before_title, before_html,
-                                   extra=json.dumps({"record": name, "textData": base64.b64encode(old_blob).decode()})),
-            self.store.snapshot_current(note_id, "pushed"),
-            self.store.commit()))
-
-        summary = an.summarize(text)
-        enc = lambda b: {"value": base64.b64encode(b if isinstance(b, bytes) else b.encode()).decode(), "type": "ENCRYPTED_BYTES"}
-        update = {"recordName": name, "recordType": rec.get("recordType", "Note"), "recordChangeTag": rec.get("recordChangeTag"),
-                  "fields": {"TitleEncrypted": enc(summary["title"]), "SnippetEncrypted": enc(summary["snippet"]),
-                             "TextDataEncrypted": enc(blob),
-                             "ModificationDate": {"value": int(now * 1000), "type": "TIMESTAMP"}}}
-        self._log({"push_edit": name, "chars": len(text), **info})
-        self.client.modify([{"operationType": "update", "record": update}])
-        res = self._after_push(note_id, name, text)
-        res.update(info)
-        return res
-
-    def inline_display(self, ident, uti):
-        """The text the page shows for an inline attachment (hashtag, mention, link), or None for block ones."""
-        if uti and uti.startswith("com.apple.notes.inlinetextattachment"):
-            return self.inline_text(ident) or None
-        rec = self.attachment_record(ident) if self.records is not None else None
-        if rec is not None and rec.get("recordType") in ("InlineAttachment", "Hashtag"):
-            return self.inline_text(ident) or None
-        if uti == "public.url" and rec is not None:
-            url = rec_text(rec, "URLStringEncrypted", "URLString", "URL") or ""
-            return (rec_text(rec, "TitleEncrypted", "Title") or url) or None
-        return None
-
-    def _mark_in_sync(self, note_id, name, remote_modified):
-        def mark():
-            row = self.store.note_row(note_id)
-            self.store.db.execute("UPDATE imports SET modified = ? WHERE source = ? AND external_id = ?",
-                                  (max(remote_modified, row["updated_at"]), SOURCE, name))
-            self.store.commit()
-        self._on_main(mark)
-
-    def push_trash(self, note_ids):
-        """Move the iCloud copies of notes to Recently Deleted (like deleting them on the iPhone)."""
-        ids = note_ids if isinstance(note_ids, list) else [note_ids]
-        self._background(ids[0] if len(ids) == 1 else None, lambda: self._push_trash(ids))
-
-    def _push_trash(self, note_ids):
-        self._ensure_client()
-        self._ensure_cache()
-        # Look at every mapping, also ones whose local note is already gone (deleted right after this call).
-        state = self._on_main(lambda: self.store.import_state(SOURCE))
-        names = [name for name, st in state.items() if st["note_id"] in note_ids]
-        trash = {"recordName": TRASH_FOLDER, "action": "VALIDATE"}
-        ms = int(time.time() * 1000)
-        ops = []
-        for rec in self.client.lookup(names) if names else []:
-            if rec.get("serverErrorCode") or rec_ref(rec, "Folder") == TRASH_FOLDER:
-                continue
-            ops.append({"operationType": "update", "record": {
-                "recordName": rec["recordName"], "recordType": rec.get("recordType", "Note"),
-                "recordChangeTag": rec.get("recordChangeTag"),
-                "fields": {"Folder": {"value": trash, "type": "REFERENCE"},
-                           "Folders": {"value": [trash], "type": "REFERENCE_LIST"},
-                           "FoldersModificationDate": {"value": ms, "type": "TIMESTAMP"}}}})
-        self._log({"push_trash": [op["record"]["recordName"] for op in ops]})
-        if ops:
-            self.client.modify(ops)
-
-        def forget():
-            # The iCloud copies are in Recently Deleted now; stop tracking them so sync doesn't bring them back.
-            for name in names:
-                self.store.forget_import(SOURCE, name)
-                self.store.forget_import(PUSH_SOURCE, name)
-            self.store.commit()
-
-        self._on_main(forget)
-        for op in ops:
-            (self.records or {}).pop(op["record"]["recordName"], None)
-        self._save_cache()
-        return {"ok": True, "trashed": len(ops)}
-
-    def _after_push(self, note_id, name, text):
-        """Read the record back, verify, and mark the local copy as in sync."""
-        back = self.client.lookup([name])
-        verified = None
-        if back and not back[0].get("serverErrorCode"):
-            if text is not None:
-                data = rec_bytes(back[0], "TextDataEncrypted")
-                verified = bool(data) and an.plain_text(an.parse_note_store(data)) == text
-            self._ensure_cache()
-            self.records[name] = back[0]
-        remote_modified = rec_time(back[0], "ModificationDate", "modified") if back else time.time()
-
-        def mark():
-            row = self.store.note_row(note_id)
-            self.store.db.execute("UPDATE imports SET modified = ? WHERE source = ? AND external_id = ?",
-                                  (max(remote_modified, row["updated_at"]), SOURCE, name))
-            self.store.commit()
-
-        self._on_main(mark)
-        self._save_cache()
-        self._log({"push_done": name, "verified": verified})
-        return {"ok": True, "verified": verified, "updated": True}
-
-    # ------------------------------------------------------ two-way sync
-
-    def sync_candidates(self):
-        """Local changes a two-way sync would send (main thread). New notes only count when created after
-        pushing was enabled and when they live in a folder that exists in iCloud."""
-        since = self.store.get_setting("icloud.pushSince")
-        if since is None:
-            since = time.time()
-            self.store.set_setting("icloud.pushSince", since)
-        cfg = self.sync_config()
-        state = self.store.import_state(SOURCE)
-        tracked = {st["note_id"] for st in state.values() if st["present"]}
-        edited = [st["note_id"] for st in state.values()
-                  if st["present"] and not st["deleted_at"] and (st["updated_at"] or 0) > (st["modified"] or 0) + 1]
-        folder_map = {local: remote for remote, local in self.store.mapping(FOLDER_SOURCE).items()}
-        if cfg.get("keepFolders", True):
-            folder_map.setdefault(self.store.default_folder_id(), DEFAULT_FOLDER)
-        else:
-            icloud_folder = self.store.find_or_create_folder("iCloud")
-            folder_map = {icloud_folder: DEFAULT_FOLDER}
-        new = []
-        for r in self.store.db.execute("SELECT id, folder_id FROM notes WHERE deleted_at IS NULL AND locked = 0"
-                                       " AND created_at > ?", (since,)):
-            if r["id"] not in tracked and r["folder_id"] in folder_map:
-                new.append({"id": r["id"], "folder": folder_map[r["folder_id"]]})
-        rows = {r["id"]: r for r in self.store.db.execute(
-            "SELECT id, body, locked FROM notes WHERE id IN (%s)" % ",".join("?" * len(edited + [n["id"] for n in new]) or "0"),
-            edited + [n["id"] for n in new])}
-        # Notes deleted here (in Recently Deleted or gone) whose iCloud copy is still tracked.
-        titles = {name: (rec_text(rec, "TitleEncrypted") or "") for name, rec in (self.records or {}).items()} \
-            if self.records is not None else {}
-        deleted = []
-        for name, st in state.items():
-            rec = (self.records or {}).get(name)
-            complete = self.records is not None and bool(self.token)  # a full, current cache
-            if (rec is None and complete) or (rec is not None and self._is_deleted(rec)):
-                continue  # already deleted in iCloud
-            if st["deleted_at"] or not st["present"]:
-                title = self.store.db.execute("SELECT title FROM notes WHERE id = ?", (st["note_id"],)).fetchone()
-                deleted.append({"id": st["note_id"], "title": title["title"] if title else titles.get(name, "")})
-        return {
-            "edited": [{"id": i, "body": rows[i]["body"]} for i in edited if i in rows and not rows[i]["locked"]],
-            "new": [dict(n, body=rows[n["id"]]["body"]) for n in new if n["id"] in rows and rows[n["id"]]["body"].strip()],
-            "deleted": deleted,
-        }
-
-    def push_prepare(self):
-        """Step 1 of Push: pull first, then work out what still has to go out (compared with the fresh state).
-        The page shows the list for confirmation and calls push_now with the converted content."""
-        if self.busy:
-            return
-        self.busy = True
-        self._set_sync_state("syncing", progress="")
-
-        def run():
-            try:
-                self._sync()
-                candidates = self._on_main(self.sync_candidates)
-                payload = json.dumps(candidates)
-                GLib.idle_add(lambda: (self.win.eval_js(f"window.N && N.sync && N.sync.onPushReady({payload})"), False)[1])
-            except NotSignedIn:
-                self.client = None
-                self._set_sync_state("signin-needed", message="Sign in to iCloud to keep syncing.")
-            except urllib.error.URLError:
-                self._set_sync_state("offline", message="Can't reach iCloud right now.")
-            except Exception as exc:
-                traceback.print_exc()
-                self._log({"sync_error": repr(exc), "trace": traceback.format_exc()})
-                self._set_sync_state("error", message=_friendly_error(exc))
-            finally:
-                self.busy = False
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def push_now(self, outgoing):
-        """Push only: send local edits and new notes. Notes changed in iCloud since the last pull are refused."""
-        if self.busy:
-            return
-        self.busy = True
-        self._set_sync_state("pushing")
-
-        def run():
-            try:
-                self._ensure_client()
-                stats = {"changed": [], "sent": 0, "created": 0, "skipped": 0}
-                self._push_outgoing(outgoing or {}, stats)
-                self._save_cache()
-                self._log({"push_now": {k: v for k, v in stats.items() if k != "changed"}})
-                self._set_sync_state("idle", last=time.time(), changes=stats)
-            except NotSignedIn:
-                self.client = None
-                self._set_sync_state("signin-needed", message="Sign in to iCloud to keep syncing.")
-            except urllib.error.URLError:
-                self._set_sync_state("offline", message="Can't reach iCloud right now.")
-            except Exception as exc:
-                traceback.print_exc()
-                self._log({"push_error": repr(exc), "trace": traceback.format_exc()})
-                self._set_sync_state("error", message=_friendly_error(exc))
-            finally:
-                self.busy = False
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _push_outgoing(self, outgoing, stats):
-        self._ensure_cache()
-        stats.update(sent=0, created=0, skipped=0, skippedReasons=[], warnings=[])
-        titles = self._on_main(lambda: {r["id"]: r["title"] for r in self.store.db.execute("SELECT id, title FROM notes")})
-        for item in outgoing.get("edited") or []:
-            title = titles.get(item["id"]) or "Untitled"
-            try:
-                name, st = self._tracked(item["id"])
-                # Pull may have turned it into a conflict (no longer tracked) or it changed again: then don't push.
-                if name is None or st["deleted_at"] or (st["updated_at"] or 0) <= (st["modified"] or 0) + 1:
-                    continue
-                res = self._push_changes(item["id"], item)
-                if res.get("ok") and not res.get("unchanged"):
-                    stats["sent"] += 1
-                    stats["changed"].append(item["id"])
-                if res.get("skippedAttachments"):
-                    n = res["skippedAttachments"]
-                    stats["warnings"].append(f"“{title}”: {n} new {'attachment' if n == 1 else 'attachments'} (image, table or file) "
-                                             "stayed on this computer — new attachments can't be created in iCloud yet.")
-                if not res.get("ok"):
-                    stats["skipped"] += 1
-                    stats["skippedReasons"].append(f"“{title}”: {res.get('message') or 'unknown error'}")
-            except Exception as exc:
-                stats["skipped"] += 1
-                stats["skippedReasons"].append(f"“{title}”: {str(exc)[:160]}")
-                self._log({"sync_push_skip": item["id"], "error": repr(exc), "trace": traceback.format_exc()})
-        deleted = [d["id"] if isinstance(d, dict) else d for d in outgoing.get("deleted") or []]
-        if deleted:
-            try:
-                stats["deleted"] = self._push_trash(deleted).get("trashed", 0)
-            except Exception as exc:
-                stats["skipped"] += len(deleted)
-                stats["skippedReasons"].append(str(exc)[:120])
-                self._log({"sync_push_skip": "deleted", "error": repr(exc)})
-        for item in outgoing.get("new") or []:
-            try:
-                res = self._push(item["id"], item, folder=item.get("folder"))
-                if res.get("ok"):
-                    stats["created"] += 1
-            except Exception as exc:
-                stats["skipped"] += 1
-                stats["skippedReasons"].append(str(exc)[:120])
-                self._log({"sync_push_skip": item["id"], "error": repr(exc)})
-
-    def _push_folder(self):
-        """The iCloud folder pushed notes go into; created on first use."""
-        known = self._on_main(lambda: self.store.mapping(PUSH_SOURCE + "-folder")).get("folder")
-        if known:
-            return known
-        self._ensure_cache()
-        for rec in self.records.values():
-            if rec.get("recordType") == "Folder" and not rec_int(rec, "Deleted") and \
-                    rec_text(rec, "TitleEncrypted") == PUSH_FOLDER_NAME:
-                name = rec["recordName"]
-                break
-        else:
-            name = str(uuid.uuid4()).upper()
-            ms = int(time.time() * 1000)
-            self.client.modify([{"operationType": "create", "record": {
-                "recordName": name, "recordType": "Folder",
-                "fields": {
-                    "TitleEncrypted": {"value": base64.b64encode(PUSH_FOLDER_NAME.encode()).decode(), "type": "ENCRYPTED_BYTES"},
-                    "TitleModificationDate": {"value": ms, "type": "TIMESTAMP"},
-                    "MinimumSupportedNotesVersion": {"value": 0, "type": "INT64"},
-                },
-            }}])
-            self._on_main(lambda: (self.store.set_mapping(PUSH_SOURCE, "folder:" + name, 0), self.store.commit()))
-        self._on_main(lambda: (self.store.set_mapping(PUSH_SOURCE + "-folder", "folder", name), self.store.commit()))
-        return name
-
-    def remove_pushed(self):
-        """Delete every note (and the folder) this app created in iCloud."""
-        if self.busy:
-            self._emit_push(None, ok=False, message="iCloud sync is running. Try again in a few seconds.")
-            return
-        self.busy = True
-
-        def run():
-            try:
-                self._ensure_client()
-                self._ensure_cache()
-                pushed = self._on_main(lambda: self.store.mapping(PUSH_SOURCE))
-                notes = [n for n in pushed if not n.startswith("folder:")]
-                folders = [n[len("folder:"):] for n in pushed if n.startswith("folder:")]
-                ops = [{"operationType": "forceDelete", "record": {"recordName": n}} for n in notes + folders]
-                if ops:
-                    self.client.modify(ops)
-
-                def forget():
-                    for n in notes:
-                        self.store.forget_import(PUSH_SOURCE, n)
-                        self.store.forget_import(SOURCE, n)  # the local copies stay as ordinary local notes
-                    for f in folders:
-                        self.store.forget_import(PUSH_SOURCE, "folder:" + f)
-                        self.store.forget_import(FOLDER_SOURCE, f)
-                    self.store.forget_import(PUSH_SOURCE + "-folder", "folder")
-                    self.store.commit()
-
-                self._on_main(forget)
-                for n in notes + folders:
-                    (self.records or {}).pop(n, None)
-                self._save_cache()
-                self._emit_push(None, ok=True, removed=len(notes))
-            except NotSignedIn:
-                self.client = None
-                self._emit_push(None, ok=False, signin=True, message="Sign in to iCloud first.")
-            except Exception as exc:
-                traceback.print_exc()
-                self._log({"remove_error": repr(exc), "trace": traceback.format_exc()})
-                self._emit_push(None, ok=False, message=str(exc))
-            finally:
-                self.busy = False
-
-        threading.Thread(target=run, daemon=True).start()
 
     def _item(self, rec, stats, keep_folders, pinned):
         if getattr(self, "_progress", None):

@@ -91,7 +91,13 @@ class Api:
         meta = self.store.create_note(folder_id)
         return self.store.save_note(meta["id"], data)
 
+    def _writable(self, note_id):
+        """iCloud notes are read-only here: they can only be read, deleted and copied."""
+        if self.store.is_icloud(note_id):
+            raise PermissionError("readonly")
+
     def saveNote(self, note_id, data):
+        self._writable(note_id)
         row = self.store.note_row(note_id)
         if row["locked"]:
             if self.keys is None:
@@ -107,6 +113,7 @@ class Api:
 
     def snapshotNote(self, note_id, reason):
         """Save the current content as a version (e.g. right before restoring an older one)."""
+        self._writable(note_id)
         self.store.snapshot_current(note_id, reason)
         self.store.commit()
 
@@ -123,10 +130,16 @@ class Api:
         self.store.empty_trash()
 
     def moveNote(self, note_id, folder_id):
+        self._writable(note_id)
         return self.store.move_note(note_id, folder_id)
 
     def setPinned(self, note_id, pinned):
+        self._writable(note_id)
         return self.store.set_pinned(note_id, pinned)
+
+    def restoreNoteState(self, note_id, folder_id, pinned, deleted_at):
+        """Undo/redo of a move, pin or delete: only ever returns a note to a state it was in before."""
+        return self.store.restore_note_state(note_id, folder_id, pinned, deleted_at)
 
     def duplicateNote(self, note_id):
         return self.store.duplicate_note(note_id)
@@ -205,6 +218,7 @@ class Api:
         self.keys = None
 
     def lockNote(self, note_id, data):
+        self._writable(note_id)
         if self.keys is None:
             raise PermissionError("locked")
         self.store.save_note(note_id, data)
@@ -312,40 +326,26 @@ class Api:
     def icloudSignOut(self):
         self._icloud().sign_out()
 
-    def icloudSyncNow(self, outgoing=None):
-        self._icloud().sync_now(outgoing=outgoing)
+    def icloudSyncNow(self):
+        self._icloud().sync_now()
 
-    def icloudPushPrepare(self):
-        self._icloud().push_prepare()
+    def icloudOpenNote(self, note_id):
+        self._icloud().open_note_on_web(note_id)
 
-    def icloudPushNow(self, outgoing):
-        self._icloud().push_now(outgoing)
+    def icloudNoteUrl(self, note_id):
+        return self._icloud().note_url(note_id)
 
-    def icloudSyncCandidates(self):
-        return self._icloud().sync_candidates()
+    def showICloudWeb(self, box, url=None):
+        self.win.show_icloud_web(box, url)
+
+    def modeChanged(self, mode):
+        self.win.mode = mode
+
+    def hideICloudWeb(self):
+        self.win.hide_icloud_web()
 
     def icloudSetSync(self, changes):
         return self._icloud().set_sync_config(changes)
-
-    def icloudPushNote(self, note_id, payload):
-        self._icloud().push_note(note_id, payload)
-
-    def icloudPushChanges(self, note_id, payload):
-        self._icloud().push_changes(note_id, payload)
-
-    def icloudPushTrash(self, note_id):
-        self._icloud().push_trash(note_id)
-
-    def icloudTrackedIds(self):
-        """Local note ids that mirror an iCloud note."""
-        return [st["note_id"] for st in self.store.import_state("icloud").values() if st["present"]]
-
-    def icloudRemovePushed(self):
-        self._icloud().remove_pushed()
-
-    def icloudPushedIds(self):
-        """Local note ids that were sent to iCloud with the test push."""
-        return [v for k, v in self.store.mapping("icloud-push").items() if not k.startswith("folder:")]
 
     def icloudSyncState(self):
         if self._icloud_importer is None and not (self.store.get_setting("icloud.sync") or {}).get("enabled"):
@@ -446,16 +446,27 @@ class NotesWindow(Gtk.ApplicationWindow):
         self.webview.connect("button-release-event", self._on_button_release)
         self.webview.connect("motion-notify-event", self._on_motion)
         self.webview.connect("load-changed", self._on_load_changed)
-        self.add(self.webview)
+        # The page fills the window; iCloud Notes on the web can be laid over part of it (the iCloud view).
+        self.overlay = Gtk.Overlay()
+        self.overlay.add(self.webview)
+        self.add(self.overlay)
+        self.icloud_view = None
+        self.mode = "icloud"
+        self.icloud_ready = False
+        self.icloud_wanted = False
+        self.theme = "light"
 
         self._watch_system_theme()
         self.apply_theme(self._initial_theme())
 
         self.connect("delete-event", self._on_delete)
+        # Window level, before the focused view: also works while typing in iCloud Notes on the web.
+        self.connect("key-press-event", self._on_key_press)
         self.connect("notify::is-active", self._on_active_changed)
         self.connect("window-state-event", self._on_window_state)
 
         self.webview.load_uri(GLib.filename_to_uri(os.path.join(WEB_DIR, "index.html")))
+        GLib.idle_add(self.preload_icloud_web)
 
     # ---------------------------------------------------------------- bridge
 
@@ -484,6 +495,117 @@ class NotesWindow(Gtk.ApplicationWindow):
         if call_id is None:
             return
         self.eval_js(f"window.N && N._resolve({json.dumps(call_id)}, {'true' if ok else 'false'}, {json.dumps(value)})")
+
+    # ------------------------------------------------- iCloud on the web
+
+    # The iCloud view starts loading as soon as the window opens, and only appears once iCloud Notes has
+    # drawn the notes: until then the page shows its own calm "Loading" screen instead of a page being
+    # built up piece by piece.
+    # Ready: the notes app frame has drawn its notes (not just its frame with Apple's own "Loading…") and
+    # stopped changing. Another page (Apple's sign-in, an error) is shown a few seconds after it loaded.
+    ICLOUD_READY_JS = """(() => { const f = document.querySelector('iframe');
+      if (!f) return '';
+      const d = f.contentDocument; const t = (d && d.body && d.body.innerText || '').trim();
+      if (!d || d.readyState !== 'complete' || t.length < 150 || /Loading/.test(t)) return '';
+      return 'notes:' + d.getElementsByTagName('*').length + ':' + t.length; })()"""
+
+    def _icloud_view(self, url=None):
+        from .icloud import USER_AGENT
+        if self.icloud_view is not None:
+            if url:
+                self.icloud_view.load_uri(url)
+            return self.icloud_view
+        view = WebKit2.WebView.new_with_context(self.api._icloud().session.context)
+        view.get_settings().set_user_agent(USER_AGENT)
+        # Pop-ups (Apple's sign-in, share sheets) stay in this view.
+        view.connect("create", lambda v, action: (v.load_request(action.get_request()), None)[1])
+        view.connect("load-changed", self._on_icloud_load)
+        view.set_halign(Gtk.Align.FILL)
+        view.set_valign(Gtk.Align.FILL)
+        view.set_no_show_all(True)
+        self._paint_icloud_view(view)
+        self.overlay.add_overlay(view)
+        self.icloud_view = view
+        self.icloud_ready = False
+        self.icloud_wanted = False
+        self._icloud_last, self._icloud_settle = "", 0
+        view.load_uri(url or "https://www.icloud.com/notes/")
+        GLib.timeout_add(150, self._poll_icloud_ready)
+        return view
+
+    def _paint_icloud_view(self, view):
+        rgba = Gdk.RGBA()
+        rgba.parse("#1e1e1e" if self.theme == "dark" else "#ffffff")
+        view.set_background_color(rgba)  # no white flash in dark mode
+
+    def _on_icloud_load(self, _view, event):
+        if event == WebKit2.LoadEvent.FINISHED and not self.icloud_ready:
+            # Never keep it hidden for long, whatever the page does.
+            GLib.timeout_add_seconds(9, lambda: (self._icloud_is_ready(), False)[1])
+
+    def _poll_icloud_ready(self):
+        if self.icloud_ready or self.icloud_view is None:
+            return False
+
+        def got(view, res):
+            try:
+                state = view.evaluate_javascript_finish(res).to_string()
+            except GLib.Error:
+                return
+            if state:
+                # The notes are there; wait until iCloud stops building the page (list, note, tables): its
+                # requests never settle (it keeps polling for changes), so look at what is drawn.
+                self._icloud_settle = self._icloud_settle + 1 if state == self._icloud_last else 0
+                self._icloud_last = state
+                if self._icloud_settle >= 10:
+                    self._icloud_is_ready()
+
+        self.icloud_view.evaluate_javascript(self.ICLOUD_READY_JS, -1, None, None, None, got)
+        return True
+
+    def _icloud_is_ready(self):
+        if self.icloud_ready or self.icloud_view is None:
+            return
+        self.icloud_ready = True
+        self.icloud_view.set_opacity(1)
+
+    def preload_icloud_web(self):
+        """Start loading iCloud Notes on the web while the app itself starts (it opens on iCloud)."""
+        self._icloud_view()
+        return False
+
+    def show_icloud_web(self, box, url=None):
+        """Lay iCloud Notes on the web over the page area in `box` (CSS pixels from each window edge)."""
+        view = self._icloud_view(url)
+        view.set_margin_start(max(0, int(box.get("left", 0))))
+        view.set_margin_top(max(0, int(box.get("top", 0))))
+        view.set_margin_end(max(0, int(box.get("right", 0))))
+        view.set_margin_bottom(max(0, int(box.get("bottom", 0))))
+        self.icloud_wanted = True
+        # While loading it is shown fully transparent: iCloud only draws some parts (tables, images) on a
+        # visible page, and it appears all at once when done.
+        view.set_opacity(1 if self.icloud_ready else 0)
+        view.show()
+
+    def _on_key_press(self, _widget, event):
+        """Ctrl+Left / Ctrl+Right: switch between iCloud (left of the switch) and Local (right)."""
+        mods = event.state & Gtk.accelerator_get_default_mod_mask()
+        if mods != Gdk.ModifierType.CONTROL_MASK or event.keyval not in (Gdk.KEY_Left, Gdk.KEY_Right):
+            return False
+        mode = "icloud" if event.keyval == Gdk.KEY_Left else "local"
+        if mode == self.mode:
+            return False  # already there: the key does what it normally does (jump a word)
+        self.eval_js(f"window.N && N.app && N.app.setMode('{mode}')")
+        return True
+
+    def hide_icloud_web(self):
+        """Returns whether it was showing."""
+        if self.icloud_view is None:
+            return False
+        was = self.icloud_wanted
+        self.icloud_wanted = False
+        self.icloud_view.hide()
+        return was
 
     def eval_js(self, script):
         if hasattr(self.webview, "evaluate_javascript"):
@@ -522,6 +644,9 @@ class NotesWindow(Gtk.ApplicationWindow):
         rgba = Gdk.RGBA()
         rgba.parse("rgba(0,0,0,0)" if self.rounded else "#1e1e1e" if dark else "#ffffff")
         self.webview.set_background_color(rgba)
+        self.theme = theme
+        if self.icloud_view is not None:
+            self._paint_icloud_view(self.icloud_view)
 
     # ------------------------------------------------------- window dragging
 
@@ -632,8 +757,6 @@ class NotesWindow(Gtk.ApplicationWindow):
     def _on_load_changed(self, _view, event):
         if event != WebKit2.LoadEvent.FINISHED:
             return
-        if not os.environ.get("NOTES_SNAPSHOT"):
-            GLib.idle_add(self.api.start_sync_if_enabled)
         snapshot = os.environ.get("NOTES_SNAPSHOT")
         if snapshot:
             script = os.environ.get("NOTES_EVAL")
@@ -648,6 +771,15 @@ class NotesWindow(Gtk.ApplicationWindow):
                 print("snapshot written to", path)
             except GLib.Error as exc:
                 print("snapshot failed:", exc, file=sys.stderr)
+            if self.icloud_view is not None and self.icloud_view.get_visible():
+                # The iCloud view is a separate widget over the page: write it next to the page snapshot.
+                v = self.icloud_view
+                print("icloud view opacity", v.get_opacity(), "margins", v.get_margin_start(), v.get_margin_top(), v.get_margin_end(),
+                      v.get_margin_bottom())
+                v.get_snapshot(WebKit2.SnapshotRegion.VISIBLE, WebKit2.SnapshotOptions.NONE, None,
+                               lambda w, r: (w.get_snapshot_finish(r).write_to_png(path[:-4] + "-icloud.png"),
+                                             self.finish_close()))
+                return
             self.finish_close()
 
         self.webview.get_snapshot(WebKit2.SnapshotRegion.VISIBLE, WebKit2.SnapshotOptions.NONE, None, done)

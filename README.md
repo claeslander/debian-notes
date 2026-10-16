@@ -45,21 +45,16 @@ Tests: `python3 -m unittest discover -s tests`
 - `#hashtags` become tags in the sidebar
 - Search across all notes, with matches highlighted in the list and the note
 - Password-locked notes (encrypted at rest), pin notes, duplicate, move, drag notes onto folders
+- Select several notes with Ctrl+A, Ctrl+click or Shift+click, then delete or move them together; Shift+click or Ctrl+click
+  folders in the sidebar to see their notes together, delete them or drag them into another folder
+- Ctrl+Z / Ctrl+Shift+Z (outside the editor) undo and redo moving, pinning, deleting, recovering and duplicating notes
 - Export to PDF (print), HTML, Markdown and plain text; import `.txt`, `.md` and `.html`
-- **Import from iCloud**: sign in on Apple's own page inside the app and bring over all notes, folders,
-  checklists, tables and attachments (⋯ → Import from iCloud…). Locked notes are skipped.
-- **iCloud pull sync** (optional): keeps imported folders up to date every few minutes. Download only;
-  if a note changes both here and in iCloud, both versions are kept. Only Apple's session token is stored,
-  never your password (in `~/.local/share/debian-notes/icloud-web/`, private to your user).
-- **Experimental test push** (off by default, Settings → iCloud): “Send to iCloud (Test)” creates a *new*
-  iCloud note in a “From Debian” folder from the open note (text and formatting; tables as text, no images).
-  Existing iCloud notes are never edited. “Remove Test Notes from iCloud” deletes everything it created.
-  Try it with a test Apple ID first.
-  “Send Changes to iCloud (Test)” applies local edits to an existing iCloud note as proper CRDT operations
-  (refused if the note changed in iCloud since the last sync, or has attachments/tables/hashtags), and deleting
-  an iCloud note can move it to Recently Deleted in iCloud too.
+- **iCloud and Local**: a switch at the top left. The app opens on **iCloud**: iCloud Notes on the web, inside the
+  window and signed in with the app's own session (sign in once; only Apple's session token is stored, in
+  `~/.local/share/debian-notes/icloud-web/`, private to your user). **Local** is this app with only the notes made on
+  this computer: sidebar, folders, tags, list and editor, no iCloud notes and nothing sent to or pulled from iCloud.
 - **Version history** for every note (Version History… in the note menu): snapshots while editing (at most every
-  10 minutes) and before every iCloud change in either direction, with preview and restore. Locked notes keep none.
+  10 minutes), with preview and restore. Locked notes and iCloud notes keep none.
 - Translucent sidebar (Settings), like macOS vibrancy.
 - Light and dark appearance following the system, adjustable text size, keyboard shortcuts for everything
 

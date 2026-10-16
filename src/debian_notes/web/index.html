@@ -11,15 +11,13 @@
     <div class="toolbar sidebar-toolbar">
       <div class="traffic" data-traffic></div>
       <div class="tb-spacer"></div>
-      <button class="tb-btn" data-action="toggleSidebar" title="Hide Folders (Ctrl+Alt+S)" data-icon="sidebar"></button>
+      <div class="mode-switch" role="group">
+        <button class="mode-btn" data-action="modeICloud" title="iCloud Notes">iCloud</button>
+        <button class="mode-btn" data-action="modeLocal" title="Notes on this computer">Local</button>
+      </div>
     </div>
     <div id="sidebar-scroll" class="sidebar-scroll"></div>
     <div class="sidebar-footer">
-      <div id="sync-bar" class="sync-bar" hidden>
-        <span id="sync-status" class="sync-status"></span>
-        <button class="sync-btn" data-sync="pull" title="Pull: download changes from iCloud"></button>
-        <button class="sync-btn" data-sync="push" title="Push: send your changes to iCloud" hidden></button>
-      </div>
       <button class="sb-new-folder" data-action="newFolder"><span data-icon="plusCircle"></span>New Folder</button>
     </div>
   </aside>
@@ -27,8 +25,6 @@
 
   <section id="list-pane">
     <div class="toolbar list-toolbar">
-      <div class="traffic traffic-inline" data-traffic></div>
-      <button class="tb-btn sidebar-show" data-action="toggleSidebar" title="Show Folders (Ctrl+Alt+S)" data-icon="sidebar"></button>
       <div class="segmented" role="group">
         <button class="seg-btn" data-action="viewList" title="View as List (Ctrl+1)" data-icon="list"></button>
         <button class="seg-btn" data-action="viewGallery" title="View as Gallery (Ctrl+2)" data-icon="gallery"></button>
@@ -52,7 +48,7 @@
       <button class="tb-btn" data-action="table" data-needs-note title="Table (Ctrl+Alt+T)" data-icon="table"></button>
       <button class="tb-btn tb-menu" data-action="mediaMenu" data-needs-note title="Attachments" data-icon="photo"></button>
       <div class="tb-spacer"></div>
-      <button class="tb-btn" data-action="shareMenu" data-needs-note title="Share and Export" data-icon="share"></button>
+      <button class="tb-btn" data-action="shareMenu" data-needs-view title="Share and Export" data-icon="share"></button>
       <button class="tb-btn tb-menu" data-action="lockMenu" data-needs-note-any title="Lock" data-icon="lock"></button>
       <button class="tb-btn" data-action="moreMenu" title="More" data-icon="more"></button>
       <div class="tb-search" id="tb-search">
@@ -65,6 +61,11 @@
       <div id="trash-banner" class="trash-banner" hidden>
         <span>Recently deleted notes can't be edited.</span>
         <button class="link-btn" data-action="recoverNote">Recover</button>
+      </div>
+      <div id="icloud-banner" class="trash-banner" hidden>
+        <span>iCloud notes are read-only here.</span>
+        <button class="link-btn" data-action="editInICloud">Edit in iCloud</button>
+        <button class="link-btn" data-action="localCopy">Make Local Copy</button>
       </div>
       <div id="note-date" class="note-date"></div>
       <div id="editor" class="editor"></div>
@@ -80,10 +81,29 @@
       <button class="link-btn" data-action="showHint">Show Hint</button>
       <div id="unlock-hint" class="locked-hint" hidden></div>
     </div>
+    <div id="multi-view" class="empty-view" hidden>
+      <div id="multi-title" class="locked-title"></div>
+      <button class="link-btn" data-action="deleteSelected">Delete</button>
+    </div>
     <div id="empty-view" class="empty-view" hidden>
       <div class="empty-title">No Note Selected</div>
     </div>
   </main>
+  <!-- iCloud view: iCloud Notes on the web is laid over this area by the window (prototype). -->
+  <div id="icloud-pane">
+    <!-- Same place as in the sidebar's toolbar, so the iCloud/Local switch never moves. -->
+    <div class="toolbar icloud-toolbar">
+      <div class="toolbar sidebar-toolbar icloud-side">
+      <div class="traffic" data-traffic></div>
+      <div class="tb-spacer"></div>
+      <div class="mode-switch" role="group">
+        <button class="mode-btn" data-action="modeICloud" title="iCloud Notes">iCloud</button>
+        <button class="mode-btn" data-action="modeLocal" title="Notes on this computer">Local</button>
+      </div>
+      </div>
+    </div>
+    <div id="icloud-area"><span class="icloud-spinner" data-icon="sync"></span><span>Loading iCloud Notes…</span></div>
+  </div>
 </div>
 
 <div id="overlay-root"></div>

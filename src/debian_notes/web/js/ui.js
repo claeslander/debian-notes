@@ -257,6 +257,7 @@
   // ------------------------------------------------------------------ toasts
 
   UI.toast = function (text) {
+    N.$$('.toast', root()).forEach((old) => old.remove());  // a new message replaces the previous one
     const t = N.el(`<div class="toast">${N.esc(text)}</div>`);
     root().appendChild(t);
     requestAnimationFrame(() => t.classList.add('show'));

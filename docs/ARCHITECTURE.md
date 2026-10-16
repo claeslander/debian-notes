@@ -81,6 +81,7 @@ graph TD
 | Locked notes with password and hint | ✅ |
 | Export / print / import | ✅ |
 | Import from iCloud (folders, formatting, tables, attachments) | ✅ (locked notes skipped) |
+| Pull from iCloud (iCloud notes read-only here) | ✅ |
 | Smart folders, Quick Notes, note-to-note links | ⏳ planned |
 | Collapsible sections, rich link previews, audio recording | ⏳ planned |
-| iCloud sync, collaboration | ❌ out of scope (local-only by design) |
+| Sending changes to iCloud, collaboration | ❌ out of scope |

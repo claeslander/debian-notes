@@ -78,6 +78,9 @@ class Store:
                 ("Notes", time.time()),
             )
             self.db.commit()
+        # Records of the removed iCloud push feature.
+        self.db.execute("DELETE FROM imports WHERE source LIKE 'icloud-push%'")
+        self.db.commit()
         self.purge_trash()
 
     # ---------------------------------------------------------------- folders
@@ -87,7 +90,9 @@ class Store:
         return row["id"] if row else None
 
     def folders(self):
-        rows = self.db.execute("SELECT * FROM folders ORDER BY is_default DESC, name COLLATE NOCASE")
+        rows = self.db.execute(
+            "SELECT *, EXISTS (SELECT 1 FROM imports i WHERE i.source = 'icloud-folder' AND i.note_id = folders.id) AS icloud"
+            " FROM folders ORDER BY is_default DESC, name COLLATE NOCASE")
         return [self._folder(r) for r in rows]
 
     def create_folder(self, name, parent_id=None):
@@ -156,7 +161,8 @@ class Store:
 
     @staticmethod
     def _folder(r):
-        return {"id": r["id"], "name": r["name"], "parentId": r["parent_id"], "isDefault": bool(r["is_default"])}
+        return {"id": r["id"], "name": r["name"], "parentId": r["parent_id"], "isDefault": bool(r["is_default"]),
+                "icloud": "icloud" in r.keys() and bool(r["icloud"]) and not r["is_default"]}
 
     # ------------------------------------------------------------------ notes
 
@@ -166,14 +172,14 @@ class Store:
             tags.setdefault(r["note_id"], []).append(r["tag"])
         rows = self.db.execute(
             "SELECT id, folder_id, title, snippet, substr(plain, 1, 400) AS preview, thumbnail,"
-            " created_at, updated_at, pinned, locked, deleted_at FROM notes"
+            " created_at, updated_at, pinned, locked, deleted_at," + self._ICLOUD + " FROM notes"
         )
         return [self._meta(r, tags.get(r["id"], [])) for r in rows]
 
     def note_meta(self, note_id):
         r = self.db.execute(
             "SELECT id, folder_id, title, snippet, substr(plain, 1, 400) AS preview, thumbnail,"
-            " created_at, updated_at, pinned, locked, deleted_at FROM notes WHERE id = ?",
+            " created_at, updated_at, pinned, locked, deleted_at," + self._ICLOUD + " FROM notes WHERE id = ?",
             (note_id,),
         ).fetchone()
         if r is None:
@@ -181,20 +187,37 @@ class Store:
         tags = [t["tag"] for t in self.db.execute("SELECT tag FROM note_tags WHERE note_id = ? ORDER BY tag", (note_id,))]
         return self._meta(r, tags)
 
+    # Notes that mirror an iCloud note: read-only here, a pull keeps them up to date.
+    _ICLOUD = " EXISTS (SELECT 1 FROM imports i WHERE i.source = 'icloud' AND i.note_id = notes.id) AS icloud"
+
+    def is_icloud(self, note_id):
+        return self.db.execute("SELECT 1 FROM imports WHERE source = 'icloud' AND note_id = ?",
+                               (note_id,)).fetchone() is not None
+
     def note_row(self, note_id):
         r = self.db.execute("SELECT * FROM notes WHERE id = ?", (note_id,)).fetchone()
         if r is None:
             raise KeyError(f"No note {note_id}")
         return r
 
+    def _new_note_id(self):
+        """An id no note ever had. SQLite would hand out the id of a note deleted for good again, and the
+        iCloud link (or undo step) still pointing at that id would then latch onto the new note."""
+        row = self.db.execute("SELECT max((SELECT ifnull(max(id), 0) FROM notes),"
+                              " (SELECT ifnull(max(note_id), 0) FROM imports WHERE source = 'icloud'))").fetchone()
+        note_id = max(row[0], self.get_setting("notes.lastId", 0) or 0) + 1
+        self.db.execute("INSERT INTO settings (key, value) VALUES ('notes.lastId', ?)"
+                        " ON CONFLICT(key) DO UPDATE SET value = excluded.value", (json.dumps(note_id),))
+        return note_id
+
     def create_note(self, folder_id, body="", title="", snippet="", plain="", tags=(), created_at=None):
         now = time.time()
         if folder_id is None or not self.db.execute("SELECT 1 FROM folders WHERE id = ?", (folder_id,)).fetchone():
             folder_id = self.default_folder_id()
         cur = self.db.execute(
-            "INSERT INTO notes (folder_id, title, snippet, body, plain, created_at, updated_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (folder_id, title, snippet, body, plain, created_at or now, created_at or now),
+            "INSERT INTO notes (id, folder_id, title, snippet, body, plain, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._new_note_id(), folder_id, title, snippet, body, plain, created_at or now, created_at or now),
         )
         self._set_tags(cur.lastrowid, tags)
         self.db.commit()
@@ -265,6 +288,15 @@ class Store:
         self.db.commit()
         return self.note_meta(note_id)
 
+    def restore_note_state(self, note_id, folder_id, pinned, deleted_at):
+        """Put a note back where it was (undo of a move, pin or delete)."""
+        if not self.folder_exists(folder_id):
+            folder_id = self.default_folder_id()
+        self.db.execute("UPDATE notes SET folder_id = ?, pinned = ?, deleted_at = ? WHERE id = ?",
+                        (folder_id, 1 if pinned else 0, deleted_at, note_id))
+        self.db.commit()
+        return self.note_meta(note_id)
+
     def trash_note(self, note_id):
         self.db.execute("UPDATE notes SET deleted_at = ?, pinned = 0 WHERE id = ?", (time.time(), note_id))
         self.db.commit()
@@ -287,9 +319,9 @@ class Store:
         r = self.note_row(note_id)
         now = time.time()
         cur = self.db.execute(
-            "INSERT INTO notes (folder_id, title, snippet, body, plain, thumbnail, created_at, updated_at,"
-            " locked, locked_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (r["folder_id"], r["title"], r["snippet"], r["body"], r["plain"], r["thumbnail"], now, now,
+            "INSERT INTO notes (id, folder_id, title, snippet, body, plain, thumbnail, created_at, updated_at,"
+            " locked, locked_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (self._new_note_id(), r["folder_id"], r["title"], r["snippet"], r["body"], r["plain"], r["thumbnail"], now, now,
              r["locked"], r["locked_payload"]),
         )
         self.db.execute(
@@ -336,6 +368,7 @@ class Store:
             "updatedAt": r["updated_at"],
             "pinned": bool(r["pinned"]),
             "locked": locked,
+            "icloud": bool(r["icloud"]),
             "deletedAt": r["deleted_at"],
             "tags": tags,
         }
@@ -365,9 +398,9 @@ class Store:
                   data.get("thumbnail"))
         if note_id is None:
             cur = self.db.execute(
-                "INSERT INTO notes (folder_id, title, snippet, body, plain, thumbnail, created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (folder_id, *fields, created, modified),
+                "INSERT INTO notes (id, folder_id, title, snippet, body, plain, thumbnail, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (self._new_note_id(), folder_id, *fields, created, modified),
             )
             note_id = cur.lastrowid
         else:

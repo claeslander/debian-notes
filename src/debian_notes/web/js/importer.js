@@ -95,7 +95,6 @@
         go('done', { result: ev });
         N.app.reloadData();
         N.call('icloudSyncState').then((s) => N.sync.onStatus(s));
-        N.app.refreshTracked && N.app.refreshTracked();
         break;
       case 'cancelled':
         if (st.step === 'scanning') go('welcome');
@@ -141,7 +140,7 @@
       });
     } else if (action === 'show-notes') {
       close();
-      N.app.setScope({ type: 'all' });
+      N.app.setScope({ type: 'local' });
     } else if (action === 'toggle-adp') {
       const box = el.querySelector('.imp-adp');
       box.classList.toggle('open');
@@ -197,7 +196,7 @@
     welcome: () => `
       ${hero()}
       <h1 class="imp-title">Import your iCloud Notes</h1>
-      <p class="imp-sub">Bring your notes, folders, checklists and tables from iCloud to this computer.</p>
+      <p class="imp-sub">Bring your notes, folders, checklists and tables from iCloud to this computer. They are read-only here — make a local copy of a note to edit it.</p>
       <div class="imp-features">
         <div class="imp-feature">${tile('folder', '#f5b800')}<div><b>Folders and notes</b><span>Your folder structure comes along, with the original dates.</span></div></div>
         <div class="imp-feature">${tile('checklist', '#30c759')}<div><b>Formatting, checklists and tables</b><span>Titles, lists, ticked items and tables are kept.</span></div></div>

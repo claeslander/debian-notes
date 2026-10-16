@@ -5,8 +5,10 @@
     notes: new Map(),
     settings: {},
     defaultFolderId: null,
-    scope: { type: 'all' },
+    scope: { type: 'local' },
+    mode: 'icloud',  // 'icloud': iCloud Notes on the web; 'local': the notes on this computer
     currentNoteId: null,
+    selection: new Set(),  // more than one id while several notes are selected
     view: 'list',
     galleryOpen: false,
     search: '',
@@ -83,74 +85,12 @@
     }
   };
 
-  // ------------------------------------------------- iCloud test push
+  const readOnlyToast = () => N.ui.toast('iCloud notes are read-only here — use Edit in iCloud or make a local copy');
 
-  const pushEnabled = () => !!(S.settings['icloud.sync'] || {}).enabled;
-  let pushed = new Set();
-
-  let tracked = new Set();  // local notes that mirror an iCloud note
-
-  // Pull: download changes from iCloud. Nothing is sent.
-  A.pull = function () { N.send('icloudSyncNow'); };
-
-  // Push: pull first (Python), then compare with the fresh state and confirm what goes out.
-  A.push = async function () {
-    if (!pushEnabled()) return;
-    await N.editor.flush();
-    N.send('icloudPushPrepare');
-  };
-
-  N.sync = N.sync || {};
-  N.sync.onPushReady = async function (c) {
-    if (!c.edited.length && !c.new.length && !c.deleted.length) {
-      N.ui.toast('Nothing to push — iCloud already has all your changes');
-      return;
-    }
-    const titles = (list) => list.map((n) => '• ' + ((S.notes.get(n.id) || {}).title || n.title || 'New Note')).join('\n');
-    const parts = [];
-    if (c.new.length) parts.push(`${c.new.length} new ${c.new.length === 1 ? 'note' : 'notes'}:\n${titles(c.new)}`);
-    if (c.edited.length) parts.push(`${c.edited.length} changed ${c.edited.length === 1 ? 'note' : 'notes'}:\n${titles(c.edited)}`);
-    if (c.deleted.length) parts.push(`${c.deleted.length} deleted ${c.deleted.length === 1 ? 'note' : 'notes'} (to Recently Deleted in iCloud):\n` +
-      c.deleted.map((d) => '• ' + (d.title || 'Untitled')).join('\n'));
-    const r = await N.ui.sheet({
-      icon: 'cloudUp', title: 'Push to iCloud?', wide: true,
-      message: 'Your notes are up to date with iCloud. These changes will be sent:\n\n' + parts.join('\n\n') +
-        (c.edited.length ? '\n\nThe current iCloud version of each changed note is saved in Version History first.' : ''),
-      buttons: [{ label: 'Cancel', value: null }, { label: 'Push', value: 'ok', primary: true }],
-    });
-    if (r.button !== 'ok') return;
-    const scratch = document.createElement('div');
-    const toParas = (body) => { scratch.innerHTML = body; return N.convert.toAppleParagraphs(scratch); };
-    N.send('icloudPushNow', {
-      edited: c.edited.map((n) => ({ id: n.id, paragraphs: toParas(n.body) })),
-      new: c.new.map((n) => ({ id: n.id, folder: n.folder, paragraphs: toParas(n.body) })),
-      deleted: c.deleted.map((d) => d.id),
-    });
-  };
-
-  A.refreshTracked = () => N.call('icloudTrackedIds').then((ids) => { tracked = new Set(ids); }).catch(() => {});
-
-  function pushMenuItems(id = S.currentNoteId) {
+  function versionMenuItems(id = S.currentNoteId) {
     const n = id != null ? S.notes.get(id) : null;
-    if (!n || n.deletedAt || n.locked) return [];
-    const items = ['-', { label: 'Version History…', icon: 'undo', action: () => showVersions(id) }];
-    if (!pushEnabled()) return items;
-    if (tracked.has(id) || pushed.has(id)) items.push({ label: 'Send Changes to iCloud…', icon: 'cloud', action: () => pushChanges(id) });
-    else items.push({ label: 'Send to iCloud…', icon: 'cloud', action: () => pushNote(id) });
-    return items;
-  }
-
-  async function pushChanges(id) {
-    if (S.currentNoteId !== id) await A.selectNote(id);
-    await N.editor.flush();
-    const root = N.editor.root();
-    if (!root) return;
-    const ok = await N.ui.confirm('Send your changes to iCloud?',
-      'Your edits are applied to this note in iCloud, the same way an iPhone would. ' +
-      'The current iCloud version is saved in Version History first, so you can always go back.', 'Send Changes');
-    if (!ok) return;
-    N.ui.toast('Sending changes to iCloud…');
-    N.send('icloudPushChanges', id, { paragraphs: N.convert.toAppleParagraphs(root) });
+    if (!n || n.deletedAt || n.locked || n.icloud) return [];
+    return ['-', { label: 'Version History…', icon: 'undo', action: () => showVersions(id) }];
   }
 
   // ------------------------------------------------------------ version history
@@ -165,7 +105,7 @@
     await N.editor.flush();
     const list = await N.call('noteVersions', id);
     if (!list.length) {
-      N.ui.alert('No earlier versions yet', 'Versions are saved automatically while you edit (at most every 10 minutes), and before any change from or to iCloud.');
+      N.ui.alert('No earlier versions yet', 'Versions are saved automatically while you edit (at most every 10 minutes).');
       return;
     }
     const fmt = (ts) => N.date.long(ts);
@@ -203,53 +143,6 @@
     N.ui.toast('Version restored');
   }
 
-  async function pushNote(id) {
-    if (S.currentNoteId !== id) await A.selectNote(id);
-    await N.editor.flush();
-    const root = N.editor.root();
-    if (!root) return;
-    const ok = await N.ui.confirm('Send this note to iCloud?',
-      'A new note is created in the “From Debian” folder in iCloud. Your other iCloud notes are not touched. ' +
-      'Check it on your iPhone or Mac afterwards.', 'Send to iCloud');
-    if (!ok) return;
-    N.ui.toast('Sending to iCloud…');
-    N.send('icloudPushNote', id, { paragraphs: N.convert.toAppleParagraphs(root) });
-  }
-
-  N.sync = N.sync || {};
-  N.sync.onPush = function (res) {
-    if (res.removed !== undefined || (res.noteId == null && res.ok)) {
-      pushed = new Set();
-      N.ui.alert('Test notes removed', `${res.removed || 0} test ${res.removed === 1 ? 'note was' : 'notes were'} deleted from iCloud. The copies on this computer are kept.`);
-      return;
-    }
-    if (!res.ok) {
-      if (res.signin) { N.ui.toast('Sign in to iCloud first'); N.importer.open({ reconnect: true }); return; }
-      N.ui.alert('Couldn’t send to iCloud', res.message || 'Something went wrong.');
-      return;
-    }
-    if (res.unchanged) { N.ui.toast('Nothing to send — iCloud already has this version'); return; }
-    if (res.trashed !== undefined) {
-      N.ui.toast(res.trashed ? `Moved ${res.trashed === 1 ? 'the note' : res.trashed + ' notes'} to Recently Deleted in iCloud` : 'Already deleted in iCloud');
-      A.refreshTracked();
-      return;
-    }
-    if (res.updated) {
-      N.ui.alert('Changes sent to iCloud',
-        (res.verified ? 'iCloud stored exactly your text. ' : 'iCloud accepted the changes, but reading them back didn’t match — please check the note on your iPhone. ') +
-        'The previous iCloud version is in Version History if you need it.');
-      return;
-    }
-    pushed.add(res.noteId);
-    A.refreshTracked();
-    N.ui.alert('Sent to iCloud',
-      `The note was created in the “${res.folder}” folder.` +
-      (res.verified ? ' iCloud returned exactly the same text.' : ' iCloud accepted it, but reading it back didn’t match — please check it on your iPhone.') +
-      ' Open Notes on your iPhone or Mac to check that it looks right.');
-  };
-
-
-
   // ------------------------------------------------------------ iCloud sync
 
   N.sync = Object.assign(N.sync || {}, {
@@ -257,71 +150,19 @@
     onStatus(st) {
       const prev = N.sync.state;
       N.sync.state = st;
-      renderSyncStatus();
       const c = st.changes;
-      if (st.state === 'idle' && (prev.state === 'syncing' || prev.state === 'pushing') && c && (c.added || c.updated || c.removed || c.moved || c.conflicts || c.sent || c.created || c.deleted || c.skipped || (c.changed || []).length)) {
+      if (st.state === 'idle' && prev.state === 'syncing' && c && (c.added || c.updated || c.removed || c.moved || c.conflicts || c.copies || (c.changed || []).length)) {
         A.reloadData({ changed: c.changed || [] });
-        A.refreshTracked();
         const parts = [];
         if (c.added) parts.push(`${c.added} new`);
         if (c.updated) parts.push(`${c.updated} updated`);
         if (c.removed) parts.push(`${c.removed} removed`);
-        if (c.conflicts) parts.push(`${c.conflicts} kept as copies`);
-        if (c.sent) parts.push(`${c.sent} sent`);
-        if (c.created) parts.push(`${c.created} created in iCloud`);
-        if (c.deleted) parts.push(`${c.deleted} deleted in iCloud`);
-        if (c.skipped) parts.push(`${c.skipped} couldn't be sent`);
-        const problems = [...(c.skippedReasons || []), ...(c.warnings || [])];
-        if (problems.length) {
-          N.ui.sheet({
-            icon: 'cloudAlert', wide: true,
-            title: c.skipped ? `${c.skipped} ${c.skipped === 1 ? 'note' : 'notes'} couldn't be sent` : 'Sent, with a note',
-            message: problems.join('\n\n'),
-            buttons: [{ label: 'OK', value: 'ok', primary: true }],
-          });
-        }
-        if (c.created || c.sent) A.refreshTracked();
+        if (c.conflicts) parts.push(`${c.conflicts} kept as local copies`);
+        if (c.copies) parts.push(`${c.copies} ${c.copies === 1 ? 'duplicate' : 'duplicates'} removed`);
         if (parts.length) N.ui.toast(`iCloud: ${parts.join(', ')}`);
       }
     },
   });
-
-  function relTime(ts) {
-    if (!ts) return '';
-    const s = Date.now() / 1000 - ts;
-    if (s < 60) return 'just now';
-    if (s < 3600) return `${Math.floor(s / 60)} min ago`;
-    if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
-    return N.date.list(ts);
-  }
-
-  function renderSyncStatus() {
-    const bar = document.getElementById('sync-bar');
-    const el = document.getElementById('sync-status');
-    const st = N.sync.state;
-    if (!st || st.state === 'off' || st.enabled === false) { bar.hidden = true; return; }
-    bar.hidden = false;
-    const text = {
-      idle: st.last ? `Synced ${relTime(st.last)}` : 'iCloud',
-      syncing: 'Pulling from iCloud…' + (st.progress && / of /.test(st.progress) ? ' ' + st.progress : ''),
-      pushing: 'Pushing to iCloud…',
-      'signin-needed': 'Sign in to keep syncing',
-      offline: 'Offline',
-      error: 'Sync problem',
-    }[st.state] || '';
-    bar.className = 'sync-bar state-' + st.state;
-    el.title = st.message || '';
-    el.textContent = text;
-    const pull = bar.querySelector('[data-sync="pull"]');
-    const push = bar.querySelector('[data-sync="push"]');
-    pull.innerHTML = N.icon('cloudDown') + '<span>Pull</span>';
-    push.innerHTML = N.icon('cloudUp') + '<span>Push</span>';
-    push.hidden = !pushEnabled();
-    const busy = st.state === 'syncing' || st.state === 'pushing';
-    pull.disabled = push.disabled = busy || st.state === 'signin-needed';
-    if (st.state === 'signin-needed') el.title = 'Click to sign in again';
-  }
-  setInterval(renderSyncStatus, 30000);
 
   A.refresh = function () {
     N.sidebar.render();
@@ -334,11 +175,13 @@
   }
 
   function updateToolbar() {
-    const n = currentNote();
+    const n = S.selection.size > 1 ? null : currentNote();
     const editable = !!n && !n.deletedAt && N.editor.isMounted() && !N.editor.isReadOnly();
     N.$$('[data-needs-note]').forEach((b) => { b.disabled = !editable; });
     N.$$('[data-needs-note-any]').forEach((b) => { b.disabled = !n || !!n.deletedAt; });
-    N.$('[data-action="deleteNote"]').disabled = !n;
+    N.$$('[data-needs-view]').forEach((b) => { b.disabled = !n || !!n.deletedAt || !N.editor.isMounted(); });
+    N.$('[data-action="lockMenu"]').disabled = !n || !!n.deletedAt || n.icloud;
+    N.$('[data-action="deleteNote"]').disabled = !n && S.selection.size < 2;
     const lockBtn = N.$('[data-action="lockMenu"]');
     const icon = n && n.locked ? (S.lock.unlocked ? 'lockOpen' : 'lock') : 'lock';
     lockBtn.dataset.icon = icon;
@@ -350,6 +193,7 @@
     document.getElementById('editor-scroll').hidden = which !== 'editor';
     document.getElementById('locked-view').hidden = which !== 'locked';
     document.getElementById('empty-view').hidden = which !== 'empty';
+    document.getElementById('multi-view').hidden = which !== 'multi';
   }
 
   // ----------------------------------------------------------- navigation
@@ -357,7 +201,6 @@
   A.setScope = async function (scope, opts = {}) {
     if (S.search) clearSearch(false);
     S.scope = scope;
-    A.setSetting('lastScope', N.sidebar.scopeKey(scope));
     if (S.view === 'gallery' && S.galleryOpen) { S.galleryOpen = false; applyLayout(); }
     N.sidebar.render();
     N.notelist.render();
@@ -370,7 +213,7 @@
     const prevId = N.editor.noteId();
     if (prevId == null) return;
     const prev = S.notes.get(prevId);
-    const discard = prev && !prev.deletedAt && !prev.locked && N.editor.isEmpty();
+    const discard = prev && !prev.deletedAt && !prev.locked && !prev.icloud && N.editor.isEmpty();
     if (discard) {
       N.editor.unmount();
       S.notes.delete(prevId);
@@ -383,6 +226,10 @@
   }
 
   A.selectNote = async function (id, opts = {}) {
+    if (S.selection.size) {
+      if (S.selection.size > 1) opts = Object.assign({}, opts, { force: true });
+      S.selection = new Set();
+    }
     if (id === S.currentNoteId && !opts.force && N.editor.noteId() === id) {
       if (opts.focus) N.editor.focus();
       return;
@@ -397,6 +244,7 @@
   async function openNote(id, opts = {}) {
     const n = id != null ? S.notes.get(id) : null;
     document.getElementById('trash-banner').hidden = true;
+    document.getElementById('icloud-banner').hidden = true;
     if (!n) {
       N.editor.unmount();
       showView('empty');
@@ -424,8 +272,9 @@
       throw err;
     }
     if (S.currentNoteId !== id) return;
-    N.editor.mount(n, content, { readOnly: !!n.deletedAt, focus: opts.focus, caret: opts.caret });
+    N.editor.mount(n, content, { readOnly: !!n.deletedAt || n.icloud, focus: opts.focus && !n.icloud, caret: opts.caret });
     document.getElementById('trash-banner').hidden = !n.deletedAt;
+    document.getElementById('icloud-banner').hidden = !n.icloud || !!n.deletedAt;
     showView('editor');
     document.getElementById('editor-scroll').scrollTop = 0;
     if (S.search) N.editor.refreshHighlights(true);
@@ -445,9 +294,11 @@
 
   A.newNote = async function () {
     if (S.search) clearSearch(false);
-    let folderId = S.scope.type === 'folder' ? S.scope.id : S.defaultFolderId;
+    let folderId = S.scope.type === 'folder' ? S.scope.id : S.scope.type === 'folders' ? S.scope.ids[0] : S.defaultFolderId;
     let initial = '';
     if (S.scope.type === 'trash') await A.setScope({ type: 'folder', id: folderId });
+    if (S.mode === 'icloud') await A.setMode('local');  // new notes are always local
+    if (S.scope.type === 'alltags') await A.setScope({ type: 'local' });  // it has no tags yet, so it wouldn't show
     if (S.scope.type === 'tag') initial = N.editor.initialHtml() + `<div>#${N.esc(S.scope.tag)}</div>`;
     await leaveCurrent();
     const meta = await N.call('createNote', folderId, initial);
@@ -466,9 +317,62 @@
     return order[i + 1] ?? order[i - 1] ?? null;
   }
 
+  // ------------------------------------------- undo for actions on notes
+  // Ctrl+Z outside the editor undoes moving, pinning, deleting, recovering and duplicating notes.
+
+  const undoStack = [];
+  const redoStack = [];
+
+  function record(label, undo, redo) {
+    undoStack.push({ label, undo, redo });
+    if (undoStack.length > 100) undoStack.shift();
+    redoStack.length = 0;
+  }
+
+  A.undo = async function () {
+    const step = undoStack.pop();
+    if (!step) { N.ui.toast('Nothing to undo'); return; }
+    await step.undo();
+    redoStack.push(step);
+    N.ui.toast(`Undo ${step.label}`);
+  };
+
+  A.redo = async function () {
+    const step = redoStack.pop();
+    if (!step) { N.ui.toast('Nothing to redo'); return; }
+    await step.redo();
+    undoStack.push(step);
+    N.ui.toast(`Redo ${step.label}`);
+  };
+
+  // Where notes are: folder, pin and Recently Deleted. Moves, pins, deletes and recovers only change these.
+  const placeOf = (ids) => ids.map((id) => S.notes.get(id)).filter(Boolean)
+    .map((n) => ({ id: n.id, folderId: n.folderId, pinned: n.pinned, deletedAt: n.deletedAt }));
+
+  async function putBack(places) {
+    if (N.editor.noteId() != null) await N.editor.flush();
+    const ids = [];
+    for (const p of places) {
+      if (!S.notes.has(p.id)) continue;  // deleted permanently since
+      S.notes.set(p.id, await N.call('restoreNoteState', p.id, p.folderId, p.pinned, p.deletedAt));
+      ids.push(p.id);
+    }
+    S.selection = new Set();
+    A.refresh();
+    const visible = N.notelist.order.filter((id) => ids.includes(id));
+    if (visible.length > 1) await showSelection(visible, visible[0]);
+    else await A.selectNote(visible[0] ?? (N.notelist.order.includes(S.currentNoteId) ? S.currentNoteId : N.notelist.order[0] ?? null), { force: true });
+  }
+
+  function recordPlaces(label, before) {
+    const after = placeOf(before.map((p) => p.id));
+    record(label, () => putBack(before), () => putBack(after));
+  }
+
   A.deleteNote = async function (id = S.currentNoteId) {
     const n = S.notes.get(id);
     if (!n) return;
+    const before = placeOf([id]);
     if (n.deletedAt) {
       const ok = await N.ui.confirm('Are you sure you want to delete this note?',
         "This note will be deleted immediately. You can't undo this action.", 'Delete', true);
@@ -484,6 +388,7 @@
       S.notes.delete(id);
     } else {
       S.notes.set(id, await N.call('deleteNote', id, false));
+      recordPlaces('Delete', before);
     }
     if (S.currentNoteId === id) S.currentNoteId = null;
     A.refresh();
@@ -495,7 +400,9 @@
     const n = S.notes.get(id);
     if (!n || !n.deletedAt) return;
     const next = neighbourOf(id);
+    const before = placeOf([id]);
     S.notes.set(id, await N.call('recoverNote', id));
+    recordPlaces('Recover', before);
     A.refresh();
     if (S.scope.type === 'trash') await A.selectNote(N.notelist.order.includes(next) ? next : N.notelist.order[0] ?? null, { force: true });
     else await openNote(id);
@@ -505,9 +412,12 @@
   A.moveNote = async function (id, folderId) {
     const n = S.notes.get(id);
     if (!n || (n.folderId === folderId && !n.deletedAt)) return;
+    if (n.icloud) { readOnlyToast(); return; }
     if (N.editor.noteId() === id) await N.editor.flush();
     const next = neighbourOf(id);
+    const before = placeOf([id]);
     S.notes.set(id, await N.call('moveNote', id, folderId));
+    recordPlaces('Move', before);
     A.refresh();
     if (id === S.currentNoteId && !N.notelist.order.includes(id)) {
       await A.selectNote(N.notelist.order.includes(next) ? next : N.notelist.order[0] ?? null);
@@ -521,7 +431,10 @@
   A.togglePin = async function (id = S.currentNoteId) {
     const n = S.notes.get(id);
     if (!n || n.deletedAt) return;
+    if (n.icloud) { readOnlyToast(); return; }
+    const before = placeOf([id]);
     S.notes.set(id, await N.call('setPinned', id, !n.pinned));
+    recordPlaces(n.pinned ? 'Unpin' : 'Pin', before);
     N.notelist.render();
   };
 
@@ -529,8 +442,184 @@
     if (N.editor.noteId() === id) await N.editor.flush();
     const meta = await N.call('duplicateNote', id);
     S.notes.set(meta.id, meta);
+    let copy = meta;
+    record('Duplicate', async () => {
+      const cur = S.notes.get(copy.id);
+      if (!cur) return;
+      if (N.editor.noteId() === copy.id) { await N.editor.flush(); N.editor.unmount(); }
+      const edited = (S.notes.get(copy.id) || cur).updatedAt !== copy.updatedAt;
+      // An untouched copy simply disappears; one edited since goes to Recently Deleted, so nothing is lost.
+      if (edited) S.notes.set(copy.id, await N.call('deleteNote', copy.id, false));
+      else { await N.call('deleteNote', copy.id, true); S.notes.delete(copy.id); }
+      if (S.currentNoteId === copy.id) S.currentNoteId = null;
+      A.refresh();
+      await A.selectNote(N.notelist.order.includes(id) ? id : N.notelist.order[0] ?? null, { force: true });
+    }, async () => {
+      if (!S.notes.has(id)) return;
+      copy = await N.call('duplicateNote', id);
+      S.notes.set(copy.id, copy);
+      A.refresh();
+      await A.selectNote(copy.id);
+    });
     A.refresh();
     await A.selectNote(meta.id);
+  };
+
+  // ------------------------------------------------------ multi-selection
+
+  async function showSelection(ids, anchor = S.currentNoteId) {
+    await leaveCurrent();  // may discard an empty new note
+    ids = ids.filter((id) => S.notes.has(id));
+    if (ids.length < 2) { await A.selectNote(ids[0] ?? null, { force: true }); return; }
+    N.editor.unmount();
+    S.selection = new Set(ids);
+    S.currentNoteId = anchor;
+    document.getElementById('multi-title').textContent = `${ids.length} Notes Selected`;
+    showView('multi');
+    N.notelist.updateSelection();
+    updateToolbar();
+  }
+
+  A.selectAll = () => showSelection(N.notelist.order.slice());
+
+  A.toggleSelect = function (id) {
+    const ids = new Set(S.selection.size > 1 ? S.selection : S.currentNoteId != null ? [S.currentNoteId] : []);
+    if (ids.has(id)) ids.delete(id); else ids.add(id);
+    const list = N.notelist.order.filter((x) => ids.has(x));
+    return list.length > 1 ? showSelection(list, id) : A.selectNote(list[0] ?? id, { force: true });
+  };
+
+  A.selectRange = function (id) {
+    const order = N.notelist.order;
+    const a = order.indexOf(S.currentNoteId);
+    const b = order.indexOf(id);
+    if (a === -1 || b === -1 || a === b) return A.selectNote(id);
+    return showSelection(order.slice(Math.min(a, b), Math.max(a, b) + 1), S.currentNoteId);
+  };
+
+  A.deleteNotes = async function (ids) {
+    if (ids.length === 1 && S.selection.size < 2) return A.deleteNote(ids[0]);
+    const notes = ids.map((id) => S.notes.get(id)).filter(Boolean);
+    if (!notes.length) return;
+    if (notes.some((n) => n.deletedAt)) {
+      const ok = await N.ui.confirm(`Are you sure you want to delete ${notes.length} notes?`,
+        "Notes in Recently Deleted are deleted immediately. You can't undo this action.", 'Delete', true);
+      if (!ok) return;
+    }
+    if (ids.includes(N.editor.noteId())) { await N.editor.flush(); N.editor.unmount(); }
+    const before = placeOf(notes.filter((n) => !n.deletedAt).map((n) => n.id));
+    for (const n of notes) {
+      if (n.deletedAt) { await N.call('deleteNote', n.id, true); S.notes.delete(n.id); }
+      else S.notes.set(n.id, await N.call('deleteNote', n.id, false));
+    }
+    if (before.length) recordPlaces('Delete', before);
+    S.selection = new Set();
+    S.currentNoteId = null;
+    A.refresh();
+    await A.selectNote(N.notelist.order[0] ?? null, { force: true });
+  };
+  A.deleteSelected = () => A.deleteNotes(N.notelist.order.filter((id) => S.selection.has(id)));
+
+  A.moveNotes = async function (ids, folderId) {
+    if (ids.length === 1 && S.selection.size < 2) return A.moveNote(ids[0], folderId);
+    const movable = ids.map((id) => S.notes.get(id)).filter((n) => n && !n.icloud);
+    if (!movable.length) { readOnlyToast(); return; }
+    if (ids.includes(N.editor.noteId())) await N.editor.flush();
+    const before = placeOf(movable.map((n) => n.id));
+    for (const n of movable) S.notes.set(n.id, await N.call('moveNote', n.id, folderId));
+    recordPlaces('Move', before);
+    S.selection = new Set();
+    A.refresh();
+    await A.selectNote(N.notelist.order.includes(S.currentNoteId) ? S.currentNoteId : N.notelist.order[0] ?? null, { force: true });
+    const f = S.folders.find((x) => x.id === folderId);
+    const skipped = ids.length - movable.length;
+    N.ui.toast(`Moved ${movable.length} ${movable.length === 1 ? 'note' : 'notes'} to “${f ? f.name : 'Notes'}”` +
+      (skipped ? ` — ${skipped} iCloud ${skipped === 1 ? 'note stays' : 'notes stay'} in iCloud's folders` : ''));
+  };
+
+  async function recoverSelected() {
+    const ids = [...S.selection];
+    const before = placeOf(ids);
+    for (const id of ids) S.notes.set(id, await N.call('recoverNote', id));
+    recordPlaces('Recover', before);
+    S.selection = new Set();
+    A.refresh();
+    await A.selectNote(N.notelist.order[0] ?? null, { force: true });
+    N.ui.toast(`${ids.length} notes recovered`);
+  }
+
+  A.selectionMenuItems = function () {
+    const ids = N.notelist.order.filter((id) => S.selection.has(id));
+    const notes = ids.map((id) => S.notes.get(id)).filter(Boolean);
+    const count = `${notes.length} Notes`;
+    if (notes.every((n) => n.deletedAt)) {
+      return [
+        { label: `Recover ${count}`, action: () => recoverSelected() },
+        '-',
+        { label: `Delete ${count} Permanently…`, danger: true, action: () => A.deleteSelected() },
+      ];
+    }
+    return [
+      ...(notes.some((n) => !n.icloud) ? [{ label: 'Move to', icon: 'folder', submenu: folderMenu((f) => A.moveNotes(ids, f.id)) }, '-'] : []),
+      { label: `Delete ${count}`, icon: 'trash', shortcut: 'Ctrl+⌫', action: () => A.deleteSelected() },
+    ];
+  };
+
+  // Edit an iCloud note where it lives: iCloud Notes on the web, signed in with the app's session.
+  A.editInICloud = async function (id = S.currentNoteId) {
+    const n = S.notes.get(id);
+    if (!n || !n.icloud) return;
+    try {
+      pendingICloudUrl = await N.call('icloudNoteUrl', id);
+      await A.setMode('icloud');
+    } catch (err) {
+      N.ui.alert('Couldn’t open iCloud', err.message);
+    }
+  };
+
+  // ------------------------------------------------- iCloud / Local
+  // Two modes, switched at the top left. iCloud: the window lays iCloud Notes on the web (signed in with
+  // the app's iCloud session) over everything but its top bar. Local: this app, with only the notes made
+  // on this computer.
+
+  let icloudWebShown = false;
+  let pendingICloudUrl = null;
+
+  A.setMode = async function (mode) {
+    if (mode === S.mode && body.classList.contains('mode-' + mode)) return;
+    if (mode === 'icloud') await leaveCurrent();
+    S.mode = mode;
+    N.send('modeChanged', mode);
+    body.classList.toggle('mode-icloud', mode === 'icloud');
+    N.$$('[data-action="modeICloud"]').forEach((b) => b.classList.toggle('active', mode === 'icloud'));
+    N.$$('[data-action="modeLocal"]').forEach((b) => b.classList.toggle('active', mode === 'local'));
+    syncICloudWeb();
+    updateDragRegionsSoon();
+    if (mode === 'local') {
+      A.refresh();
+      await A.selectNote(N.notelist.order.includes(S.currentNoteId) ? S.currentNoteId : N.notelist.order[0] ?? null, { force: true });
+    }
+  };
+
+  function syncICloudWeb() {
+    const active = S.mode === 'icloud';
+    // Sheets, menus and popovers of the page would end up underneath it: step aside while one is open.
+    const covered = !!document.querySelector('#overlay-root .sheet-backdrop, #overlay-root .menu, #overlay-root .popover, #overlay-root .importer-backdrop');
+    if (active && !covered) {
+      const r = document.getElementById('icloud-area').getBoundingClientRect();
+      const box = { left: r.left, top: r.top, right: window.innerWidth - r.right, bottom: window.innerHeight - r.bottom };
+      N.call('showICloudWeb', box, pendingICloudUrl).catch(() => {});
+      pendingICloudUrl = null;
+      icloudWebShown = true;
+    } else if (icloudWebShown) {
+      N.call('hideICloudWeb').catch(() => {});
+      icloudWebShown = false;
+    }
+  }
+
+  A.localCopy = async function (id = S.currentNoteId) {
+    await A.duplicateNote(id);
+    N.ui.toast('Local copy made — you can edit this one');
   };
 
   A.emptyTrash = async function () {
@@ -539,7 +628,7 @@
     if (currentNote() && currentNote().deletedAt) N.editor.unmount();
     await N.call('emptyTrash');
     for (const [id, n] of S.notes) if (n.deletedAt) S.notes.delete(id);
-    if (S.scope.type === 'trash') await A.setScope({ type: 'all' });
+    if (S.scope.type === 'trash') await A.setScope({ type: 'local' });
     else A.refresh();
   };
 
@@ -549,9 +638,17 @@
     if (n.deletedAt) {
       return [
         { label: 'Recover', action: () => A.recoverNote(id) },
-        { label: 'Move to', submenu: folderMenu((f) => A.moveNote(id, f.id)) },
+        ...(n.icloud ? [] : [{ label: 'Move to', submenu: folderMenu((f) => A.moveNote(id, f.id)) }]),
         '-',
         { label: 'Delete Permanently…', danger: true, action: () => A.deleteNote(id) },
+      ];
+    }
+    if (n.icloud) {
+      return [
+        { label: 'Edit in iCloud…', icon: 'cloud', action: () => A.editInICloud(id) },
+        { label: 'Make Local Copy', action: () => A.localCopy(id) },
+        '-',
+        { label: 'Delete', icon: 'trash', shortcut: 'Ctrl+⌫', action: () => A.deleteNote(id) },
       ];
     }
     return [
@@ -560,7 +657,7 @@
       '-',
       { label: 'Move to', icon: 'folder', submenu: folderMenu((f) => A.moveNote(id, f.id), n.folderId) },
       { label: 'Duplicate Note', action: () => A.duplicateNote(id) },
-      ...pushMenuItems(id),
+      ...versionMenuItems(id),
       '-',
       { label: 'Delete', icon: 'trash', shortcut: 'Ctrl+⌫', action: () => A.deleteNote(id) },
     ];
@@ -605,9 +702,25 @@
     const res = await N.call('deleteFolder', id);
     S.folders = res.folders;
     S.notes = new Map(res.notes.map((n) => [n.id, n]));
-    const scopeGone = S.scope.type === 'folder' && !S.folders.some((x) => x.id === S.scope.id);
-    if (scopeGone) await A.setScope({ type: 'all' });
+    const scopeGone = (S.scope.type === 'folder' && !S.folders.some((x) => x.id === S.scope.id)) ||
+      (S.scope.type === 'folders' && S.scope.ids.some((id) => !S.folders.some((x) => x.id === id)));
+    if (scopeGone) await A.setScope({ type: 'local' });
     else { A.refresh(); await A.selectNote(S.currentNoteId, { force: true }); }
+  };
+
+  A.deleteFolders = async function (ids) {
+    const ok = await N.ui.confirm(`Are you sure you want to delete ${ids.length} folders?`,
+      'All notes and subfolders in these folders will be moved to Recently Deleted.', 'Delete Folders', true);
+    if (!ok) return;
+    await N.editor.flush();
+    let res = null;
+    for (const id of ids) {
+      if (!S.folders.some((x) => x.id === id)) continue;  // already gone as a subfolder of another
+      res = await N.call('deleteFolder', id);
+      S.folders = res.folders;
+    }
+    if (res) S.notes = new Map(res.notes.map((n) => [n.id, n]));
+    await A.setScope({ type: 'local' });
   };
 
   // --------------------------------------------------------------- search
@@ -688,6 +801,7 @@
   async function lockNote(id = S.currentNoteId) {
     const n = S.notes.get(id);
     if (!n || n.locked || n.deletedAt) return;
+    if (n.icloud) { readOnlyToast(); return; }
     if (!(await ensureUnlocked())) return;
     if (N.editor.noteId() !== id) await A.selectNote(id);
     await N.editor.flush();
@@ -858,7 +972,7 @@
       { label: 'Copy as Markdown', action: () => copyText(N.convert.toMarkdown(N.editor.root())) },
       '-',
       { label: 'Print…', shortcut: 'Ctrl+P', action: () => N.send('print') },
-      ...pushMenuItems(),
+      ...versionMenuItems(),
     ]);
   }
 
@@ -867,7 +981,6 @@
     const setSort = (v) => { A.setSetting('sortBy', v); N.notelist.render(); };
     N.ui.menuFor(anchor, [
       { label: 'New Folder', shortcut: 'Ctrl+Shift+N', action: () => A.newFolder() },
-      { label: 'Import from iCloud…', action: () => N.importer.open() },
       { label: 'Import Files…', action: () => importNotes() },
       '-',
       { label: 'View as List', checked: S.view === 'list', shortcut: 'Ctrl+1', action: () => setView('list') },
@@ -880,7 +993,6 @@
         ],
       },
       { label: 'Group by Date', checked: S.settings.groupByDate !== false, action: () => { A.setSetting('groupByDate', S.settings.groupByDate === false); N.notelist.render(); } },
-      { label: S.settings.sidebarVisible === false ? 'Show Folders' : 'Hide Folders', shortcut: 'Ctrl+Alt+S', action: () => toggleSidebar() },
       '-',
       { label: 'Settings…', shortcut: 'Ctrl+,', action: () => openSettings() },
       { label: 'Keyboard Shortcuts', action: () => showShortcuts() },
@@ -965,14 +1077,6 @@
           ${check('slashCommands', 'Slash commands — type / to format a line', !!S.settings.slashCommands)}
 
         </div></div>
-        <div class="pref-row pref-top"><span>iCloud:</span><div class="pref-checks">
-          ${check('icloudSync', 'Keep notes in sync with iCloud', !!(S.settings['icloud.sync'] || {}).enabled)}
-          <div class="pref-inline">Pull ${sel('icloudInterval', [[0, 'only when I click Pull'], [5, 'every 5 minutes'], [15, 'every 15 minutes'], [30, 'every 30 minutes'], [60, 'every hour']], (S.settings['icloud.sync'] || {}).interval || 0)}</div>
-          <div class="pref-inline"><button class="push-btn" data-pref="syncNow">Pull Now</button>
-          <button class="push-btn" data-pref="pushNow">Push Now</button>
-          <span class="pref-muted">${N.sync.state.last ? 'Last synced ' + relTime(N.sync.state.last) : ''}</span></div>
-          <span class="pref-muted">Pull downloads changes, Push sends yours. If a note changes in both places, both versions are kept.</span>
-        </div></div>
         <div class="pref-row"><span>Locked notes:</span><div>
           ${S.lock.configured ? '<button class="push-btn" data-pref="changePassword">Change Password…</button>' : '<span class="pref-muted">No password set yet</span>'}
         </div></div>
@@ -983,14 +1087,6 @@
       onOpen(sheet) {
         sheet.addEventListener('change', (e) => {
           const t = e.target;
-          if (t.name === 'icloudSync' || t.name === 'icloudInterval') {
-            const changes = t.name === 'icloudSync' ? { enabled: t.checked } : { interval: +t.value };
-            N.call('icloudSetSync', changes).then((cfg) => {
-              S.settings['icloud.sync'] = cfg;
-              N.sync.onStatus(Object.assign({}, N.sync.state, { enabled: cfg.enabled, state: cfg.enabled ? N.sync.state.state === 'off' ? 'idle' : N.sync.state.state : 'off' }));
-            });
-            return;
-          }
           const v = t.type === 'checkbox' ? t.checked : (t.name === 'textSize' || t.name === 'sidebarGlass') ? +t.value : t.value;
           A.setSetting(t.name, v);
           if (t.name === 'appearance') applyTheme();
@@ -1004,8 +1100,6 @@
           }
         });
         sheet.addEventListener('click', (e) => {
-          if (e.target.closest('[data-pref="syncNow"]')) { A.pull(); return; }
-          if (e.target.closest('[data-pref="pushNow"]')) { A.push(); return; }
           if (e.target.closest('[data-pref="changePassword"]')) {
             sheet.closest('.sheet-backdrop').remove();
             changePassword();
@@ -1023,8 +1117,8 @@
       ['Checklist', 'Ctrl+Shift+L'], ['Mark as checked', 'Ctrl+Shift+U'], ['Bulleted list', 'Ctrl+Shift+7'],
       ['Dashed list', 'Ctrl+Shift+8'], ['Numbered list', 'Ctrl+Shift+9'], ['Block quote', "Ctrl+'"],
       ['Table', 'Ctrl+Alt+T'], ['Indent / outdent', 'Ctrl+] / Ctrl+['], ['Bold / italic / underline', 'Ctrl+B / I / U'],
-      ['Paste and match style', 'Ctrl+Shift+V'], ['List / gallery view', 'Ctrl+1 / Ctrl+2'], ['Show or hide folders', 'Ctrl+Alt+S'],
-      ['Bigger / smaller text', 'Ctrl+= / Ctrl+-'],
+      ['Paste and match style', 'Ctrl+Shift+V'], ['List / gallery view', 'Ctrl+1 / Ctrl+2'],
+      ['Bigger / smaller text', 'Ctrl+= / Ctrl+-'], ['iCloud / Local', 'Ctrl+← / Ctrl+→'],
       ['Command menu (enable in Settings)', '/'],
     ];
     N.ui.sheet({
@@ -1066,11 +1160,6 @@
     N.notelist.render();
     N.notelist.updateSelection();
     document.getElementById('note-list').focus();
-  }
-
-  function toggleSidebar() {
-    A.setSetting('sidebarVisible', S.settings.sidebarVisible === false);
-    applyLayout();
   }
 
   // ---------------------------------------------------------- dividers
@@ -1128,7 +1217,6 @@
 
     if (e.key === 'Escape' && e.target === searchInput()) { clearSearch(true); searchInput().blur(); }
     else if (mod && e.altKey && k === 't') N.editor.insertTable();
-    else if (mod && e.altKey && k === 's') toggleSidebar();
     else if (mod && e.altKey && k === 'f') searchInput().focus();
     else if (mod && e.shiftKey && !e.altKey) {
       if (k === 'n') A.newFolder();
@@ -1142,6 +1230,7 @@
       else if (e.code === 'Digit7') N.editor.toggleList('bullet');
       else if (e.code === 'Digit8') N.editor.toggleList('dashed');
       else if (e.code === 'Digit9') N.editor.toggleList('numbered');
+      else if (k === 'z' && !inEditor && !inInput) A.redo();
       else handled = false;
     } else if (mod && !e.altKey) {
       if (k === 'n') A.newNote();
@@ -1157,7 +1246,10 @@
       else if (k === '=' || k === '+') setTextSize(1);
       else if (k === '-') setTextSize(-1);
       else if (k === '0') { A.setSetting('textSize', 15); applyTextSize(); }
-      else if ((e.key === 'Backspace' || e.key === 'Delete') && !inEditor && !inInput) A.deleteNote();
+      else if ((e.key === 'Backspace' || e.key === 'Delete') && !inEditor && !inInput) ACTIONS.deleteNote();
+      else if (k === 'a' && !inEditor && !inInput) A.selectAll();
+      else if (k === 'z' && !inEditor && !inInput) A.undo();
+      else if (k === 'y' && !inEditor && !inInput) A.redo();
       else handled = false;
     } else handled = false;
 
@@ -1172,10 +1264,14 @@
   // -------------------------------------------------------------- actions
 
   const ACTIONS = {
-    toggleSidebar,
+    modeICloud: () => A.setMode('icloud'),
+    modeLocal: () => A.setMode('local'),
     newFolder: () => A.newFolder(),
     newNote: () => A.newNote(),
-    deleteNote: () => A.deleteNote(),
+    deleteNote: () => (S.selection.size > 1 ? A.deleteSelected() : A.deleteNote()),
+    deleteSelected: () => A.deleteSelected(),
+    localCopy: () => A.localCopy(),
+    editInICloud: () => A.editInICloud(),
     recoverNote: () => A.recoverNote(),
     viewList: () => setView('list'),
     viewGallery: () => setView('gallery'),
@@ -1216,13 +1312,9 @@
       e.preventDefault();
     });
     searchInput().addEventListener('input', runSearch);
-    document.getElementById('sync-bar').addEventListener('click', (e) => {
-      const st = N.sync.state.state;
-      if (st === 'syncing' || st === 'pushing') return;
-      if (st === 'signin-needed') { N.importer.open({ reconnect: true }); return; }
-      const b = e.target.closest('[data-sync]');
-      if (b && b.dataset.sync === 'pull') A.pull();
-      else if (b && b.dataset.sync === 'push') A.push();
+    document.getElementById('editor-scroll').addEventListener('dblclick', () => {
+      const n = currentNote();
+      if (n && n.icloud && !n.deletedAt) A.editInICloud(n.id);  // read-only here: edit it in iCloud
     });
     document.getElementById('unlock-form').addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -1257,6 +1349,7 @@
     S.systemTheme = data.systemTheme;
     S.lock = { configured: data.lockConfigured, unlocked: false, hint: data.lockHint };
     S.view = S.settings.view === 'gallery' ? 'gallery' : 'list';
+    S.settings.sidebarVisible = true;  // the sidebar can't be hidden any more
     N.onWindowActive(data.windowActive);
     body.classList.toggle('rounded', !!data.rounded);
     body.classList.toggle('maximized', !!data.maximized);
@@ -1275,9 +1368,9 @@
     window.addEventListener('resize', updateDragRegionsSoon);
     new MutationObserver(updateDragRegionsSoon).observe(document.getElementById('overlay-root'), { childList: true });
 
-    let scope = N.sidebar.parseScope(S.settings.lastScope || 'all');
-    if (scope.type === 'folder' && !S.folders.some((f) => f.id === scope.id)) scope = { type: 'all' };
-    S.scope = scope;
+    // The app opens on iCloud, before anything is drawn: the local notes must not flash first.
+    S.scope = { type: 'local' };
+    await A.setMode('icloud');
     N.sidebar.render();
     N.notelist.render();
     const last = S.settings.lastNote;
@@ -1285,9 +1378,11 @@
     await A.selectNote(start, { force: true });
     document.getElementById('note-list').focus({ preventScroll: true });
     body.classList.add('ready');
-    N.call('icloudSyncState').then((st) => N.sync.onStatus(st)).catch(() => {});
-    N.call('icloudPushedIds').then((ids) => { pushed = new Set(ids); }).catch(() => {});
-    A.refreshTracked();
+    // Keep the iCloud view laid exactly over its place, and out of the way of sheets and menus.
+    new ResizeObserver(() => { if (S.mode === 'icloud') syncICloudWeb(); })
+      .observe(document.getElementById('icloud-area'));
+    new MutationObserver(() => { if (S.mode === 'icloud') syncICloudWeb(); })
+      .observe(document.getElementById('overlay-root'), { childList: true });
     updateDragRegions();
   }
 

@@ -81,6 +81,31 @@ class StoreTest(unittest.TestCase):
         self.assertEqual(self.store.search("1234"), [])
 
 
+class NoteIdTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.store = Store(self.tmp.name)
+
+    def tearDown(self):
+        self.store.close()
+        self.tmp.cleanup()
+
+    def test_ids_of_deleted_notes_are_never_reused(self):
+        # Regression: SQLite reused the id of an iCloud note deleted for good, so a brand-new note took over
+        # its iCloud link and opened read-only.
+        f = self.store.default_folder_id()
+        icloud_id = self.store.save_imported_note("icloud", "REC", f, {"title": "From iCloud"}, 1.0, 1.0)
+        self.store.commit()
+        self.store.delete_note(icloud_id)
+        new = self.store.create_note(f)
+        self.assertNotEqual(new["id"], icloud_id)
+        self.assertFalse(new["icloud"])
+        # Also for a plain local note deleted for good (undo steps refer to note ids).
+        self.store.delete_note(new["id"])
+        self.assertGreater(self.store.create_note(f)["id"], new["id"])
+        self.assertGreater(self.store.duplicate_note(icloud_id + 2)["id"], icloud_id + 2)
+
+
 class CryptoTest(unittest.TestCase):
     def test_roundtrip_and_tamper(self):
         salt = crypto.new_salt()
