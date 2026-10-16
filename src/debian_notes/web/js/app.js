@@ -297,7 +297,10 @@
     let folderId = S.scope.type === 'folder' ? S.scope.id : S.scope.type === 'folders' ? S.scope.ids[0] : S.defaultFolderId;
     let initial = '';
     if (S.scope.type === 'trash') await A.setScope({ type: 'folder', id: folderId });
-    if (S.mode === 'icloud') await A.setMode('local');  // new notes are always local
+    if (S.mode === 'icloud') {
+      if (!localEnabled()) return;  // Local is turned off: new notes are made in iCloud itself
+      await A.setMode('local');  // new notes are always local
+    }
     if (S.scope.type === 'alltags') await A.setScope({ type: 'local' });  // it has no tags yet, so it wouldn't show
     if (S.scope.type === 'tag') initial = N.editor.initialHtml() + `<div>#${N.esc(S.scope.tag)}</div>`;
     await leaveCurrent();
@@ -584,11 +587,37 @@
 
   let icloudWebShown = false;
   let pendingICloudUrl = null;
+  let icloudFrozen = false;
+
+  A.icloudFrozen = function (url) {
+    icloudFrozen = true;
+    document.getElementById('icloud-area').style.backgroundImage = `url("${url}?${Date.now()}")`;
+  };
+
+  function unfreeze() {
+    if (!icloudFrozen) return;
+    icloudFrozen = false;
+    document.getElementById('icloud-area').style.backgroundImage = '';
+    N.call('forgetFrozenICloud').catch(() => {});
+  }
+
+  const icloudEnabled = () => S.settings.icloudEnabled !== false;
+  const localEnabled = () => S.settings.localEnabled !== false;
+
+  // iCloud or Local can be turned off in Settings: then the switch goes and the app stays in the other one.
+  function applyParts() {
+    body.classList.toggle('single-part', !icloudEnabled() || !localEnabled());
+    N.send('partsChanged', icloudEnabled());
+    if (S.mode === 'icloud' && !icloudEnabled()) A.setMode('local');
+    else if (S.mode === 'local' && !localEnabled()) A.setMode('icloud');
+  }
 
   A.setMode = async function (mode) {
+    if ((mode === 'icloud' && !icloudEnabled()) || (mode === 'local' && !localEnabled())) return;
     if (mode === S.mode && body.classList.contains('mode-' + mode)) return;
     if (mode === 'icloud') await leaveCurrent();
     S.mode = mode;
+    unfreeze();
     N.send('modeChanged', mode);
     A.setSetting('lastMode', mode);  // the app opens where it was closed
     body.classList.toggle('mode-icloud', mode === 'icloud');
@@ -613,6 +642,11 @@
       N.call('showICloudWeb', box, pendingICloudUrl).catch(() => {});
       pendingICloudUrl = null;
       icloudWebShown = true;
+      if (icloudFrozen) setTimeout(unfreeze, 150);  // the live view is back on top: drop the picture of it
+    } else if (active && icloudWebShown) {
+      // Python swaps in a picture of iCloud (N.app.icloudFrozen) and then hides the live view.
+      N.call('freezeICloudWeb').catch(() => {});
+      icloudWebShown = false;
     } else if (icloudWebShown) {
       N.call('hideICloudWeb').catch(() => {});
       icloudWebShown = false;
@@ -1079,25 +1113,30 @@
       `<label class="pref-check"><input type="checkbox" name="${name}"${value ? ' checked' : ''}><span>${label}</span></label>`;
     const html = `
       <div class="prefs">
+        <div class="pref-section">General<small>Everywhere in Notes</small></div>
         <div class="pref-row"><span>Appearance:</span>${sel('appearance', [['system', 'System'], ['light', 'Light'], ['dark', 'Dark']], S.settings.appearance || 'system')}</div>
+        <div class="pref-row pref-top"><span>Background:</span><div class="pref-checks">
+          ${check('background', 'Keep Notes running in the background', !!S.settings.background)}
+          <span class="pref-muted">Opens instantly: closing only hides Notes. Uses about 650 MB of memory.</span>
+        </div></div>
+
+        <div class="pref-section">iCloud<small>iCloud Notes on the web, in the app</small></div>
+        <div class="pref-row"><span></span>${check('icloudEnabled', 'Use iCloud', icloudEnabled())}</div>
+
+        <div class="pref-section">Local<small>Notes stored on this computer</small></div>
+        <div class="pref-row"><span></span>${check('localEnabled', 'Use Local', localEnabled())}</div>
         <div class="pref-row"><span>Default text size:</span>${sel('textSize', [12, 13, 14, 15, 16, 17, 18, 20, 22].map((s) => [s, s + ' pt']), S.settings.textSize || 15)}</div>
         <div class="pref-row"><span>New notes start with:</span>${sel('newNoteStyle', [['title', 'Title'], ['heading', 'Heading'], ['subheading', 'Subheading'], ['body', 'Body']], S.settings.newNoteStyle || 'title')}</div>
-        <div class="pref-row pref-top"><span>Transparency:</span><div class="pref-checks">
-          ${check('noTransparency', 'Disable transparency', !!S.settings.noTransparency)}
-          <div class="pref-inline" data-glass-row ${S.settings.noTransparency ? 'hidden' : ''}>Sidebar ${sel('sidebarGlass', [[0.04, 'subtle'], [0.1, 'light'], [0.2, 'medium']], sidebarGlass() || 0.04)}</div>
-        </div></div>
         <div class="pref-row"><span>Sort notes by:</span>${sel('sortBy', [['updated', 'Date Edited'], ['created', 'Date Created'], ['title', 'Title']], S.settings.sortBy || 'updated')}</div>
         <div class="pref-row"><span></span><div class="pref-checks">
           ${check('groupByDate', 'Group notes by date', S.settings.groupByDate !== false)}
           ${check('sortChecked', 'Sort checked items to the bottom', !!S.settings.sortChecked)}
           ${check('showCounts', 'Show note counts', S.settings.showCounts !== false)}
           ${check('slashCommands', 'Slash commands: type / to format a line', !!S.settings.slashCommands)}
-
         </div></div>
-        <div class="pref-row pref-top"><span>Background:</span><div class="pref-checks">
-          ${check('background', 'Keep Notes running in the background', !!S.settings.background)}
-          <span class="pref-muted">Closing the window only hides it, and Notes starts hidden when you log in, so iCloud
-            opens instantly. Uses about 650 MB of memory and almost no processor time while hidden. Quit for real with Ctrl+Q or ⋯ → Quit Notes.</span>
+        <div class="pref-row pref-top"><span>Sidebar:</span><div class="pref-checks">
+          ${check('noTransparency', 'Disable transparency', !!S.settings.noTransparency)}
+          <div class="pref-inline" data-glass-row ${S.settings.noTransparency ? 'hidden' : ''}>Transparency ${sel('sidebarGlass', [[0.04, 'subtle'], [0.1, 'light'], [0.2, 'medium']], sidebarGlass() || 0.04)}</div>
         </div></div>
         <div class="pref-row"><span>Locked notes:</span><div>
           ${S.lock.configured ? '<button class="push-btn" data-pref="changePassword">Change Password…</button>' : '<span class="pref-muted">No password set yet</span>'}
@@ -1109,6 +1148,14 @@
       onOpen(sheet) {
         sheet.addEventListener('change', (e) => {
           const t = e.target;
+          if (t.name === 'icloudEnabled' || t.name === 'localEnabled') {
+            // One of the two always stays on.
+            const other = sheet.querySelector(`[name="${t.name === 'icloudEnabled' ? 'localEnabled' : 'icloudEnabled'}"]`);
+            if (!t.checked && !other.checked) { t.checked = true; N.ui.toast('Keep iCloud or Local on'); return; }
+            A.setSetting(t.name, t.checked);
+            applyParts();
+            return;
+          }
           if (t.name === 'background') {
             S.settings.background = t.checked;
             N.call('setBackground', t.checked);
@@ -1404,7 +1451,10 @@
     // The app opens where it was closed (iCloud by default, Local until iCloud is set up), and chooses
     // before anything is drawn so the other one never flashes first.
     S.scope = { type: 'local' };
-    await A.setMode(data.icloudConfigured && S.settings.lastMode !== 'local' ? 'icloud' : 'local');
+    const startOn = !localEnabled() ? 'icloud' : !icloudEnabled() ? 'local'
+      : data.icloudConfigured && S.settings.lastMode !== 'local' ? 'icloud' : 'local';
+    body.classList.toggle('single-part', !icloudEnabled() || !localEnabled());
+    await A.setMode(startOn);
     N.sidebar.render();
     N.notelist.render();
     const last = S.settings.lastNote;

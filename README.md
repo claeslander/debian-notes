@@ -64,7 +64,8 @@ A switch at the top left (or <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<k
   Everything you change there is saved to iCloud by Apple and shows up on your iPhone, iPad and Mac.
 - **Local**: notes that live only on this computer: folders, tags, the full editor, and nothing sent anywhere.
 
-Notes opens where you left it. Until you've signed in to iCloud, it opens on Local.
+Notes opens where you left it. Until you've signed in to iCloud, it opens on Local. Only need one of the two? Turn the other
+off in Settings and the switch disappears.
 
 **Background mode** (Settings): closing the window only hides it, and Notes starts hidden when you log in, so
 iCloud opens instantly. While hidden it uses about 650 MB of memory and almost no processor time.

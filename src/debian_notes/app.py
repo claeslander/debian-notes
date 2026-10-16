@@ -342,6 +342,16 @@ class Api:
     def modeChanged(self, mode):
         self.win.mode = mode
 
+    def partsChanged(self, icloud_enabled):
+        if not icloud_enabled:
+            self.win.hide_icloud_web()
+
+    def freezeICloudWeb(self):
+        self.win.freeze_icloud_web()
+
+    def forgetFrozenICloud(self):
+        self.win.forget_frozen_icloud()
+
     def hideICloudWeb(self):
         self.win.hide_icloud_web()
 
@@ -595,6 +605,8 @@ class NotesWindow(Gtk.ApplicationWindow):
     def preload_icloud_web(self):
         """Start loading iCloud Notes on the web while the app itself starts: when it opens on iCloud, or to
         have it ready in background mode."""
+        if self.store.get_setting("icloudEnabled", True) is False:
+            return False
         if self.icloud_configured() and (self.store.get_setting("lastMode") != "local" or self.store.get_setting("background")):
             self._icloud_view()
         return False
@@ -634,6 +646,38 @@ class NotesWindow(Gtk.ApplicationWindow):
             return False  # already there: the key does what it normally does (jump a word)
         self.eval_js(f"window.N && N.app && N.app.setMode('{mode}')")
         return True
+
+    def _frozen_path(self):
+        # In the user's runtime folder: in memory, private to the user, gone at logout.
+        return os.path.join(GLib.get_user_runtime_dir() or GLib.get_tmp_dir(), "debian-notes-icloud.png")
+
+    def freeze_icloud_web(self):
+        """A sheet or menu of the page opens over iCloud: put a picture of iCloud in its place first, so it stays
+        in view (dimmed) instead of leaving an empty grey area while the live view steps aside."""
+        view = self.icloud_view
+        if view is None or not view.get_visible() or not self.icloud_ready:
+            self.hide_icloud_web()
+            return
+        path = self._frozen_path()
+
+        def done(v, res):
+            try:
+                surface = v.get_snapshot_finish(res)
+                fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "wb") as fh:
+                    surface.write_to_png(fh)
+                self.eval_js(f"N.app.icloudFrozen({json.dumps(GLib.filename_to_uri(path))})")
+                GLib.timeout_add(80, lambda: (self.hide_icloud_web(), False)[1])  # once the picture is drawn
+            except (GLib.Error, OSError):
+                self.hide_icloud_web()
+
+        view.get_snapshot(WebKit2.SnapshotRegion.VISIBLE, WebKit2.SnapshotOptions.NONE, None, done)
+
+    def forget_frozen_icloud(self):
+        try:
+            os.remove(self._frozen_path())
+        except OSError:
+            pass
 
     def hide_icloud_web(self):
         """Returns whether it was showing."""
@@ -885,6 +929,7 @@ class NotesWindow(Gtk.ApplicationWindow):
         if self._closed:
             return False
         self._closed = True
+        self.forget_frozen_icloud()
         self._save_geometry()
         self.destroy()
         return False
