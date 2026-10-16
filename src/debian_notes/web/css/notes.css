@@ -164,6 +164,9 @@ body.resizing, body.resizing * { cursor: col-resize !important; }
   justify-content: center; color: var(--secondary); font-size: 13px; }
 .toolbar.icloud-toolbar { padding: 0; border-bottom: 1px solid var(--divider); }
 .toolbar.icloud-side { width: var(--sidebar-w); flex: none; border: 0; background: none; }
+.icloud-more { margin-right: 10px; }
+/* iCloud steps aside while a sheet or menu of the app is open: no "Loading" text behind it then. */
+body.icloud-covered #icloud-area > * { visibility: hidden; }
 
 /* iCloud / Local switch, where the sidebar button used to be. */
 .mode-switch { display: inline-flex; gap: 2px; padding: 2px; border-radius: 7px; background: var(--seg-bg); }

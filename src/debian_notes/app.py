@@ -381,6 +381,14 @@ class Api:
     def print(self):
         self.win.print_page()
 
+    def quitApp(self):
+        self.win.quit_app()
+
+    def setBackground(self, enabled):
+        """Background mode: closing hides the window, and Notes starts hidden at login."""
+        self.store.set_setting("background", bool(enabled))
+        set_autostart(bool(enabled))
+
     def quitReady(self):
         GLib.idle_add(self.win.finish_close)
 
@@ -397,6 +405,7 @@ class NotesWindow(Gtk.ApplicationWindow):
         self._press = None
         self._closing = False
         self._closed = False
+        self._quitting = False
         self._iface_settings = None
 
         self.set_icon_name("debian-notes")
@@ -584,8 +593,9 @@ class NotesWindow(Gtk.ApplicationWindow):
             return False
 
     def preload_icloud_web(self):
-        """Start loading iCloud Notes on the web while the app itself starts, when it opens on iCloud."""
-        if self.icloud_configured():
+        """Start loading iCloud Notes on the web while the app itself starts: when it opens on iCloud, or to
+        have it ready in background mode."""
+        if self.icloud_configured() and (self.store.get_setting("lastMode") != "local" or self.store.get_setting("background")):
             self._icloud_view()
         return False
 
@@ -604,11 +614,14 @@ class NotesWindow(Gtk.ApplicationWindow):
 
     def _on_key_press(self, _widget, event):
         """Ctrl+Left / Ctrl+Right: switch between iCloud (left of the switch) and Local (right).
-        Ctrl+Tab (with or without Shift): switch to the other one. Ctrl+Q: quit."""
+        Ctrl+Tab (with or without Shift): switch to the other one. Ctrl+Q: quit. Ctrl+,: settings."""
         mods = event.state & Gtk.accelerator_get_default_mod_mask()
         ctrl = Gdk.ModifierType.CONTROL_MASK
         if mods == ctrl and event.keyval in (Gdk.KEY_q, Gdk.KEY_Q):
-            self.close()  # same way as the close button: the open note is saved first
+            self.quit_app()
+            return True
+        if mods == ctrl and event.keyval == Gdk.KEY_comma:
+            self.eval_js("window.N && N.app && N.app.openSettings()")  # also while typing in iCloud
             return True
         if event.keyval in (Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab, Gdk.KEY_KP_Tab) and mods in (ctrl, ctrl | Gdk.ModifierType.SHIFT_MASK):
             mode = "local" if self.mode == "icloud" else "icloud"
@@ -843,22 +856,36 @@ class NotesWindow(Gtk.ApplicationWindow):
     def _on_delete(self, *_):
         if self._closing:
             return False
+        if self.store.get_setting("background") and not self._quitting:
+            # Background mode: only hide, so iCloud Notes stays loaded and the app opens instantly.
+            self.eval_js("N.beforeHide && N.beforeHide()")
+            self._save_geometry()
+            self.hide()
+            return True
         self._closing = True
         self.eval_js("N.beforeQuit ? N.beforeQuit() : window.webkit.messageHandlers.bridge.postMessage("
                      "JSON.stringify({id: null, method: 'quitReady', args: []}))")
         GLib.timeout_add(2500, self.finish_close)
         return True
 
-    def finish_close(self):
-        if self._closed:
-            return False
-        self._closed = True
+    def quit_app(self):
+        """Really quit, also in background mode (Ctrl+Q, Quit Notes). The open note is saved first."""
+        self._quitting = True
+        self.close()
+
+    def _save_geometry(self):
         maximized = self.is_maximized()
         self.store.set_setting("window.maximized", maximized)
         if not maximized:
             w, h = self.get_size()
             self.store.set_setting("window.width", w)
             self.store.set_setting("window.height", h)
+
+    def finish_close(self):
+        if self._closed:
+            return False
+        self._closed = True
+        self._save_geometry()
         self.destroy()
         return False
 
@@ -871,6 +898,7 @@ class NotesApplication(Gtk.Application):
         super().__init__(application_id=APP_ID, flags=flags)
         self.window = None
         self.store = None
+        self.start_hidden = False  # --background: started at login, window stays hidden until opened
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
@@ -895,6 +923,9 @@ class NotesApplication(Gtk.Application):
         if self.window is None:
             self.window = NotesWindow(self, self.store)
             self.window.connect("destroy", lambda *_: setattr(self, "window", None))
+            if self.start_hidden:
+                self.start_hidden = False
+                return  # the (hidden) window keeps the app running until it is opened
         self.window.show_all()
         self.window.present()
 
@@ -904,5 +935,27 @@ class NotesApplication(Gtk.Application):
         Gtk.Application.do_shutdown(self)
 
 
+AUTOSTART = os.path.join(GLib.get_user_config_dir(), "autostart", APP_ID + ".desktop")
+
+
+def set_autostart(enabled):
+    """Start Notes hidden at login (background mode), with the launcher this copy was started from."""
+    if not enabled:
+        try:
+            os.remove(AUTOSTART)
+        except FileNotFoundError:
+            pass
+        return
+    launcher = os.path.realpath(sys.argv[0]) if os.path.basename(sys.argv[0]) == "debian-notes" else "debian-notes"
+    os.makedirs(os.path.dirname(AUTOSTART), exist_ok=True)
+    with open(AUTOSTART, "w", encoding="utf-8") as fh:
+        fh.write("[Desktop Entry]\nType=Application\nName=Notes (background)\n"
+                 f"Exec={launcher} --background\nIcon=debian-notes\nNoDisplay=true\n"
+                 "X-GNOME-Autostart-enabled=true\n")
+
+
 def main():
-    return NotesApplication().run(sys.argv)
+    app = NotesApplication()
+    argv = [a for a in sys.argv if a != "--background"]
+    app.start_hidden = len(argv) != len(sys.argv)
+    return app.run(argv)

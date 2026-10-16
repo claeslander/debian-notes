@@ -59,10 +59,16 @@ you need them.
 
 A switch at the top left (or <kbd>Ctrl</kbd>+<kbd>←</kbd> / <kbd>Ctrl</kbd>+<kbd>→</kbd>, or <kbd>Ctrl</kbd>+<kbd>Tab</kbd>) moves between two places:
 
-- **iCloud** (where the app opens once you've signed in): your iCloud notes, in iCloud Notes on the web, shown inside the app
+- **iCloud**: your iCloud notes, in iCloud Notes on the web, shown inside the app
   window. You sign in once on Apple's own sign-in page; after that the app opens straight into your notes.
   Everything you change there is saved to iCloud by Apple and shows up on your iPhone, iPad and Mac.
 - **Local**: notes that live only on this computer: folders, tags, the full editor, and nothing sent anywhere.
+
+Notes opens where you left it. Until you've signed in to iCloud, it opens on Local.
+
+**Background mode** (Settings): closing the window only hides it, and Notes starts hidden when you log in, so
+iCloud opens instantly. While hidden it uses about 650 MB of memory and almost no processor time.
+Quit for real with <kbd>Ctrl</kbd>+<kbd>Q</kbd> or ⋯ → *Quit Notes*.
 
 > [!NOTE]
 > With **Advanced Data Protection** turned on, iCloud.com can't open your notes until you allow it: on your

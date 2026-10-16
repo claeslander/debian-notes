@@ -590,6 +590,7 @@
     if (mode === 'icloud') await leaveCurrent();
     S.mode = mode;
     N.send('modeChanged', mode);
+    A.setSetting('lastMode', mode);  // the app opens where it was closed
     body.classList.toggle('mode-icloud', mode === 'icloud');
     N.$$('[data-action="modeICloud"]').forEach((b) => b.classList.toggle('active', mode === 'icloud'));
     N.$$('[data-action="modeLocal"]').forEach((b) => b.classList.toggle('active', mode === 'local'));
@@ -605,6 +606,7 @@
     const active = S.mode === 'icloud';
     // Sheets, menus and popovers of the page would end up underneath it: step aside while one is open.
     const covered = !!document.querySelector('#overlay-root .sheet-backdrop, #overlay-root .menu, #overlay-root .popover, #overlay-root .importer-backdrop');
+    body.classList.toggle('icloud-covered', active && covered);
     if (active && !covered) {
       const r = document.getElementById('icloud-area').getBoundingClientRect();
       const box = { left: r.left, top: r.top, right: window.innerWidth - r.right, bottom: window.innerHeight - r.bottom };
@@ -976,6 +978,17 @@
     ]);
   }
 
+  // The same ⋯ menu in iCloud, with what applies there.
+  function icloudMenu(anchor) {
+    N.ui.menuFor(anchor, [
+      { label: 'Settings…', shortcut: 'Ctrl+,', action: () => openSettings() },
+      { label: 'Keyboard Shortcuts', action: () => showShortcuts() },
+      { label: 'About Notes', action: () => showAbout() },
+      '-',
+      { label: 'Quit Notes', shortcut: 'Ctrl+Q', action: () => N.send('quitApp') },
+    ]);
+  }
+
   function moreMenu(anchor) {
     const sortBy = S.settings.sortBy || 'updated';
     const setSort = (v) => { A.setSetting('sortBy', v); N.notelist.render(); };
@@ -997,6 +1010,8 @@
       { label: 'Settings…', shortcut: 'Ctrl+,', action: () => openSettings() },
       { label: 'Keyboard Shortcuts', action: () => showShortcuts() },
       { label: 'About Notes', action: () => showAbout() },
+      '-',
+      { label: 'Quit Notes', shortcut: 'Ctrl+Q', action: () => N.send('quitApp') },
     ]);
   }
 
@@ -1055,6 +1070,8 @@
 
   // -------------------------------------------------------------- sheets
 
+  A.openSettings = () => { if (!document.querySelector('#overlay-root .sheet-backdrop')) openSettings(); };
+
   function openSettings() {
     const sel = (name, options, value) => `<select name="${name}">` +
       options.map(([v, l]) => `<option value="${v}"${String(v) === String(value) ? ' selected' : ''}>${l}</option>`).join('') + '</select>';
@@ -1077,6 +1094,11 @@
           ${check('slashCommands', 'Slash commands: type / to format a line', !!S.settings.slashCommands)}
 
         </div></div>
+        <div class="pref-row pref-top"><span>Background:</span><div class="pref-checks">
+          ${check('background', 'Keep Notes running in the background', !!S.settings.background)}
+          <span class="pref-muted">Closing the window only hides it, and Notes starts hidden when you log in, so iCloud
+            opens instantly. Uses about 650 MB of memory and almost no processor time while hidden. Quit for real with Ctrl+Q or ⋯ → Quit Notes.</span>
+        </div></div>
         <div class="pref-row"><span>Locked notes:</span><div>
           ${S.lock.configured ? '<button class="push-btn" data-pref="changePassword">Change Password…</button>' : '<span class="pref-muted">No password set yet</span>'}
         </div></div>
@@ -1087,6 +1109,11 @@
       onOpen(sheet) {
         sheet.addEventListener('change', (e) => {
           const t = e.target;
+          if (t.name === 'background') {
+            S.settings.background = t.checked;
+            N.call('setBackground', t.checked);
+            return;
+          }
           const v = t.type === 'checkbox' ? t.checked : (t.name === 'textSize' || t.name === 'sidebarGlass') ? +t.value : t.value;
           A.setSetting(t.name, v);
           if (t.name === 'appearance') applyTheme();
@@ -1264,6 +1291,7 @@
   // -------------------------------------------------------------- actions
 
   const ACTIONS = {
+    icloudMenu: (b) => icloudMenu(b),
     modeICloud: () => A.setMode('icloud'),
     modeLocal: () => A.setMode('local'),
     newFolder: () => A.newFolder(),
@@ -1334,6 +1362,11 @@
 
   // ----------------------------------------------------------------- boot
 
+  // Background mode hides the window instead of closing it: save what is being edited.
+  N.beforeHide = async function () {
+    try { await N.editor.flush(); } catch (_) { /* nothing to save */ }
+  };
+
   N.beforeQuit = async function () {
     try { await leaveCurrent(); } catch (_) { /* quitting anyway */ }
     N.send('quitReady');
@@ -1368,10 +1401,10 @@
     window.addEventListener('resize', updateDragRegionsSoon);
     new MutationObserver(updateDragRegionsSoon).observe(document.getElementById('overlay-root'), { childList: true });
 
-    // The app opens on iCloud once that is set up (Local before), and chooses before anything is drawn:
-    // the local notes must not flash first.
+    // The app opens where it was closed (iCloud by default, Local until iCloud is set up), and chooses
+    // before anything is drawn so the other one never flashes first.
     S.scope = { type: 'local' };
-    await A.setMode(data.icloudConfigured ? 'icloud' : 'local');
+    await A.setMode(data.icloudConfigured && S.settings.lastMode !== 'local' ? 'icloud' : 'local');
     N.sidebar.render();
     N.notelist.render();
     const last = S.settings.lastNote;
