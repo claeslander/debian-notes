@@ -814,12 +814,80 @@ body.no-transparency .toast { background: #28282a; }
 /* ----------------------------------------------------------------- print */
 
 @media print {
-  :root { --text: #000; --editor-bg: #fff; --link: #8a6500; color-scheme: light; }
-  html, body { height: auto; overflow: visible; background: #fff; }
-  #sidebar, #list-pane, .divider, .toolbar, #table-tools, #trash-banner, #icloud-banner, #overlay-root, .locked-view, .empty-view { display: none !important; }
-  #app { display: block; height: auto; }
-  #editor-pane { display: block !important; }
+  /* PDF export and printing: always the light look, whatever the app's appearance. */
+  :root, :root[data-theme] {
+    color-scheme: light;
+    --ui-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Inter Variable", "Cantarell", "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+    --mono-font: ui-monospace, "SF Mono", "JetBrains Mono", "Noto Sans Mono", "DejaVu Sans Mono", monospace;
+    --sidebar-bg: #eceae9;
+    --sidebar-rgb: 236, 234, 233;
+    --list-bg: #ffffff;
+    --editor-bg: #ffffff;
+    --text: #1d1d1f;
+    --text-soft: rgba(0, 0, 0, 0.72);
+    --secondary: #86868b;
+    --secondary2: #a1a1a6;
+    --icon: #6e6e73;
+    --separator: rgba(0, 0, 0, 0.09);
+    --divider: rgba(0, 0, 0, 0.13);
+    --hover: rgba(0, 0, 0, 0.055);
+    --pressed: rgba(0, 0, 0, 0.1);
+    --accent: #e3a400;
+    --accent-text: #b98500;
+    --link: #c08b00;
+    --caret: #e3a400;
+    --sel-active: #fde28c;
+    --sel-inactive: #e3e3e5;
+    --sel-text: inherit;
+    --sidebar-sel: rgba(0, 0, 0, 0.085);
+    --search-bg: rgba(0, 0, 0, 0.055);
+    --search-hl: rgba(255, 210, 10, 0.55);
+    --tag-pill: rgba(0, 0, 0, 0.06);
+    --check-border: #c4c4c9;
+    --check-glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='white' stroke-width='3.2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M6.5 12.5l3.8 3.8 7.2-8.3'/%3E%3C/svg%3E");
+    --quote-bar: #d1d1d6;
+    --table-border: #d6d6db;
+    --menu-bg: rgba(243, 243, 243, 0.9);
+    --menu-border: rgba(0, 0, 0, 0.13);
+    --menu-hl: #0a64d8;
+    --popover-bg: #fbfbfb;
+    --sheet-bg: #efefef;
+    --btn-bg: #ffffff;
+    --btn-primary: #0a7aff;
+    --field-bg: #ffffff;
+    --field-border: rgba(0, 0, 0, 0.16);
+    --seg-bg: rgba(0, 0, 0, 0.055);
+    --card-bg: #ffffff;
+    --card-border: rgba(0, 0, 0, 0.12);
+    --card-alt: #f5f5f7;
+    --text-sel: rgba(255, 200, 0, 0.35);
+    --tl-inactive: #d4d4d6;
+    --scroll-thumb: rgba(0, 0, 0, 0.22);
+    --shadow-pop: 0 12px 38px rgba(0, 0, 0, 0.16), 0 2px 8px rgba(0, 0, 0, 0.08);
+    --x-glyph: #fff;
+  }
+  @page { margin: 0; }  /* margins come from the page setup (A4, 20 mm) */
+  html, body { height: auto; overflow: visible; background: #fff !important; }
+  #sidebar, #list-pane, .divider, .toolbar, #table-tools, #trash-banner, #icloud-banner, #icloud-pane, #overlay-root,
+  .locked-view, .empty-view, #multi-view { display: none !important; }
+  #app { display: block; height: auto; background: #fff !important; }
+  #editor-pane { display: block !important; background: #fff; }
   .editor-scroll { overflow: visible; padding: 0; }
-  .note-date { text-align: left; padding: 0 0 8px; }
-  :root[data-theme="dark"] .editor img.nt-sketch { filter: none; }
+
+  .note-date { text-align: left; padding: 0 0 6px; font-size: 9pt; letter-spacing: 0.02em; color: #8e8e93; }
+  .editor { font-size: 11pt; line-height: 1.55; color: #1d1d1f; }
+  .editor h1 { font-size: 22pt; margin: 0 0 10pt; padding-bottom: 8pt; border-bottom: 1px solid #e5e5ea; }
+  .editor h2 { font-size: 15pt; margin: 16pt 0 4pt; }
+  .editor h3 { font-size: 12.5pt; margin: 12pt 0 3pt; }
+  .editor h1, .editor h2, .editor h3 { break-after: avoid; page-break-after: avoid; }
+  .editor p, .editor div, .editor li { orphans: 3; widows: 3; }
+  .editor table.nt-table { margin: 8pt 0; break-inside: avoid; page-break-inside: avoid; }
+  .editor table.nt-table td { border-color: #d1d1d6; padding: 5pt 9pt; }
+  .editor tr, .editor img, .editor blockquote, .editor pre { break-inside: avoid; page-break-inside: avoid; }
+  .editor img.nt-img { border-radius: 6px; max-height: 240mm; }
+  .editor blockquote { border-left-color: #d6b43b; color: #3a3a3c; }
+  .editor a { color: #8a6500; }
+  .editor mark { background: none; color: inherit; }  /* no search highlights on paper */
+  .editor img.nt-sketch { filter: none !important; }
+  * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }  /* keep checkbox and tag colours */
 }

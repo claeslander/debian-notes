@@ -42,9 +42,12 @@
     document.documentElement.style.setProperty('--editor-size', (S.settings.textSize || 15) + 'px');
   }
 
+  // Transparency is off unless turned on in Settings.
+  const noTransparency = () => S.settings.noTransparency !== false;
+
   // Sidebar transparency: 0 (off) .. 0.2. Older setting `translucentSidebar: false` means off.
   function sidebarGlass() {
-    if (S.settings.noTransparency) return 0;
+    if (noTransparency()) return 0;
     if (S.settings.sidebarGlass !== undefined) return +S.settings.sidebarGlass || 0;
     return S.settings.translucentSidebar === false ? 0 : 0.04;
   }
@@ -56,7 +59,7 @@
     body.classList.toggle('sidebar-hidden', S.settings.sidebarVisible === false);
     const glass = sidebarGlass();
     body.classList.toggle('glass', glass > 0);
-    body.classList.toggle('no-transparency', !!S.settings.noTransparency);
+    body.classList.toggle('no-transparency', noTransparency());
     document.documentElement.style.setProperty('--glass', String(glass));
     body.classList.toggle('view-gallery', S.view === 'gallery');
     body.classList.toggle('gallery-open', S.view === 'gallery' && S.galleryOpen);
@@ -588,10 +591,34 @@
   let icloudWebShown = false;
   let pendingICloudUrl = null;
   let icloudFrozen = false;
+  let freezing = null;  // promise while the live view is being swapped for a picture of it
+  let freezeDone = null;
+  let thawTimer = null;
 
-  A.icloudFrozen = function (url) {
-    icloudFrozen = true;
-    document.getElementById('icloud-area').style.backgroundImage = `url("${url}?${Date.now()}")`;
+  const isCovered = () => !!document.querySelector('#overlay-root .sheet-backdrop, #overlay-root .menu, #overlay-root .popover, #overlay-root .importer-backdrop');
+  const nextFrame = () => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+
+  // Before a sheet or menu of the page opens over iCloud: show a picture of iCloud in its place and only
+  // then hide the live view (it lies above the page, so the menu would otherwise appear underneath it).
+  A.freezeICloud = function () {
+    if (S.mode !== 'icloud' || !icloudWebShown) return freezing || Promise.resolve();
+    icloudWebShown = false;
+    freezing = new Promise((resolve) => { freezeDone = resolve; });
+    N.call('freezeICloudWeb').catch(() => A.icloudFrozen(null));
+    return freezing;
+  };
+
+  // Called by Python with the picture (or null when there is none, e.g. while iCloud is still loading).
+  A.icloudFrozen = async function (url) {
+    if (url) {
+      icloudFrozen = true;
+      document.getElementById('icloud-area').style.backgroundImage = `url("${url}?${Date.now()}")`;
+      await nextFrame();
+    }
+    await N.call('hideICloudWeb').catch(() => {});
+    const done = freezeDone;
+    freezing = freezeDone = null;
+    if (done) done();
   };
 
   function unfreeze() {
@@ -631,27 +658,35 @@
     }
   };
 
+  function showLive() {
+    const r = document.getElementById('icloud-area').getBoundingClientRect();
+    const box = { left: r.left, top: r.top, right: window.innerWidth - r.right, bottom: window.innerHeight - r.bottom };
+    N.call('showICloudWeb', box, pendingICloudUrl).catch(() => {});
+    pendingICloudUrl = null;
+    icloudWebShown = true;
+    if (icloudFrozen) setTimeout(unfreeze, 150);  // the live view is back on top: drop the picture of it
+  }
+
   function syncICloudWeb() {
     const active = S.mode === 'icloud';
-    // Sheets, menus and popovers of the page would end up underneath it: step aside while one is open.
-    const covered = !!document.querySelector('#overlay-root .sheet-backdrop, #overlay-root .menu, #overlay-root .popover, #overlay-root .importer-backdrop');
+    const covered = isCovered();
     body.classList.toggle('icloud-covered', active && covered);
-    if (active && !covered) {
-      const r = document.getElementById('icloud-area').getBoundingClientRect();
-      const box = { left: r.left, top: r.top, right: window.innerWidth - r.right, bottom: window.innerHeight - r.bottom };
-      N.call('showICloudWeb', box, pendingICloudUrl).catch(() => {});
-      pendingICloudUrl = null;
-      icloudWebShown = true;
-      if (icloudFrozen) setTimeout(unfreeze, 150);  // the live view is back on top: drop the picture of it
-    } else if (active && icloudWebShown) {
-      // Python swaps in a picture of iCloud (N.app.icloudFrozen) and then hides the live view.
-      N.call('freezeICloudWeb').catch(() => {});
-      icloudWebShown = false;
+    if (active && covered) {
+      if (icloudWebShown) A.freezeICloud();
+    } else if (active) {
+      if (icloudFrozen || freezing) {
+        // Wait a moment: a menu often closes to open a sheet (Settings…), and iCloud shouldn't flash in between.
+        clearTimeout(thawTimer);
+        thawTimer = setTimeout(() => { if (S.mode === 'icloud' && !isCovered()) showLive(); }, 150);
+      } else {
+        showLive();
+      }
     } else if (icloudWebShown) {
       N.call('hideICloudWeb').catch(() => {});
       icloudWebShown = false;
     }
   }
+
 
   A.localCopy = async function (id = S.currentNoteId) {
     await A.duplicateNote(id);
@@ -1013,7 +1048,8 @@
   }
 
   // The same ⋯ menu in iCloud, with what applies there.
-  function icloudMenu(anchor) {
+  async function icloudMenu(anchor) {
+    await A.freezeICloud();  // so the menu opens above iCloud straight away
     N.ui.menuFor(anchor, [
       { label: 'Settings…', shortcut: 'Ctrl+,', action: () => openSettings() },
       { label: 'Keyboard Shortcuts', action: () => showShortcuts() },
@@ -1104,7 +1140,11 @@
 
   // -------------------------------------------------------------- sheets
 
-  A.openSettings = () => { if (!document.querySelector('#overlay-root .sheet-backdrop')) openSettings(); };
+  A.openSettings = async () => {
+    if (document.querySelector('#overlay-root .sheet-backdrop')) return;
+    await A.freezeICloud();
+    openSettings();
+  };
 
   function openSettings() {
     const sel = (name, options, value) => `<select name="${name}">` +
@@ -1135,8 +1175,8 @@
           ${check('slashCommands', 'Slash commands: type / to format a line', !!S.settings.slashCommands)}
         </div></div>
         <div class="pref-row pref-top"><span>Sidebar:</span><div class="pref-checks">
-          ${check('noTransparency', 'Disable transparency', !!S.settings.noTransparency)}
-          <div class="pref-inline" data-glass-row ${S.settings.noTransparency ? 'hidden' : ''}>Transparency ${sel('sidebarGlass', [[0.04, 'subtle'], [0.1, 'light'], [0.2, 'medium']], sidebarGlass() || 0.04)}</div>
+          ${check('noTransparency', 'Disable transparency', noTransparency())}
+          <div class="pref-inline" data-glass-row ${noTransparency() ? 'hidden' : ''}>Transparency ${sel('sidebarGlass', [[0.04, 'subtle'], [0.1, 'light'], [0.2, 'medium']], sidebarGlass() || 0.04)}</div>
         </div></div>
         <div class="pref-row"><span>Locked notes:</span><div>
           ${S.lock.configured ? '<button class="push-btn" data-pref="changePassword">Change Password…</button>' : '<span class="pref-muted">No password set yet</span>'}

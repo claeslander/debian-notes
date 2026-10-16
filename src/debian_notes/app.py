@@ -251,11 +251,13 @@ class Api:
     # --------------------------------------------------- import / export
 
     def exportNote(self, fmt, content, suggested_name):
-        if fmt == "pdf":
-            self.win.print_page()
-            return True
-        ext = {"html": "html", "markdown": "md", "text": "txt"}[fmt]
         safe = re.sub(r'[\\/:*?"<>|]+', "", suggested_name or "Note").strip()[:80] or "Note"
+        if fmt == "pdf":
+            path = self.win.choose_save_path("Export as PDF", f"{safe}.pdf")
+            if path:
+                self.win.print_page(path)
+            return bool(path)
+        ext = {"html": "html", "markdown": "md", "text": "txt"}[fmt]
         path = self.win.choose_save_path("Export Note", f"{safe}.{ext}")
         if not path:
             return False
@@ -656,7 +658,7 @@ class NotesWindow(Gtk.ApplicationWindow):
         in view (dimmed) instead of leaving an empty grey area while the live view steps aside."""
         view = self.icloud_view
         if view is None or not view.get_visible() or not self.icloud_ready:
-            self.hide_icloud_web()
+            self.eval_js("N.app.icloudFrozen(null)")  # nothing to picture: the page just hides it
             return
         path = self._frozen_path()
 
@@ -666,10 +668,10 @@ class NotesWindow(Gtk.ApplicationWindow):
                 fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
                 with os.fdopen(fd, "wb") as fh:
                     surface.write_to_png(fh)
+                # The page shows the picture and then asks to hide the live view (hideICloudWeb).
                 self.eval_js(f"N.app.icloudFrozen({json.dumps(GLib.filename_to_uri(path))})")
-                GLib.timeout_add(80, lambda: (self.hide_icloud_web(), False)[1])  # once the picture is drawn
             except (GLib.Error, OSError):
-                self.hide_icloud_web()
+                self.eval_js("N.app.icloudFrozen(null)")
 
         view.get_snapshot(WebKit2.SnapshotRegion.VISIBLE, WebKit2.SnapshotOptions.NONE, None, done)
 
@@ -891,9 +893,26 @@ class NotesWindow(Gtk.ApplicationWindow):
         dialog.destroy()
         return paths
 
-    def print_page(self):
+    def print_page(self, pdf_path=None):
+        """Print the open note (Ctrl+P), or write it straight to a PDF file. The page's print style lays the
+        note out on A4 in the light look; the margins come from here."""
+        setup = Gtk.PageSetup()
+        setup.set_paper_size(Gtk.PaperSize.new(Gtk.PAPER_NAME_A4))
+        for side in ("top", "bottom", "left", "right"):
+            getattr(setup, f"set_{side}_margin")(20, Gtk.Unit.MM)
         op = WebKit2.PrintOperation.new(self.webview)
-        op.run_dialog(self)
+        op.set_page_setup(setup)
+        if not pdf_path:
+            op.run_dialog(self)
+            return
+        settings = Gtk.PrintSettings()
+        settings.set_printer("Print to File")
+        settings.set(Gtk.PRINT_SETTINGS_OUTPUT_FILE_FORMAT, "pdf")
+        settings.set(Gtk.PRINT_SETTINGS_OUTPUT_URI, GLib.filename_to_uri(pdf_path))
+        op.set_print_settings(settings)
+        op.connect("finished", lambda *_: self.eval_js("N.ui && N.ui.toast('Exported as PDF')"))
+        op.connect("failed", lambda _op, err: self.eval_js(f"N.ui && N.ui.alert('Couldn’t export the PDF', {json.dumps(err.message)})"))
+        op.print_()
 
     # --------------------------------------------------------------- close
 
