@@ -872,8 +872,6 @@ class NotesWindow(Gtk.ApplicationWindow):
             if self.icloud_view is not None and self.icloud_view.get_visible():
                 # The iCloud view is a separate widget over the page: write it next to the page snapshot.
                 v = self.icloud_view
-                print("icloud view opacity", v.get_opacity(), "margins", v.get_margin_start(), v.get_margin_top(), v.get_margin_end(),
-                      v.get_margin_bottom())
                 v.get_snapshot(WebKit2.SnapshotRegion.VISIBLE, WebKit2.SnapshotOptions.NONE, None,
                                lambda w, r: (w.get_snapshot_finish(r).write_to_png(path[:-4] + "-icloud.png"),
                                              self.finish_close()))
