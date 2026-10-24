@@ -26,7 +26,7 @@ you need them.
   `* `, `- `, `1. ` and `[] ` start a list as you type
 - Tables with rows and columns you add, remove and Tab through
 - Images, file attachments and sketches; drag and drop or paste them in
-- Optional slash commands: type `/` to turn a line into a title, list, checklist, table and more, or `/date` to insert today's date
+- Optional slash commands: type `/` to turn a line into a title, list, checklist, table and more, or `/date` and `/hour` to insert today's date or the current time
 
 **Organising**
 

@@ -826,6 +826,7 @@
     { id: 'image', label: 'Photo…', icon: 'photo', keys: 'image afbeelding foto picture', run: () => N.app.insertPhotos() },
     { id: 'file', label: 'Attach File…', icon: 'paperclip', keys: 'bestand bijlage attachment', run: () => N.app.attachFile() },
     { id: 'date', label: 'Date', icon: 'calendar', keys: 'datum today vandaag', run: () => exec('insertText', todayText()) },
+    { id: 'hour', label: 'Time', icon: 'clock', keys: 'hour uur tijd now nu', run: () => exec('insertText', nowText()) },
     { id: 'sketch', label: 'Sketch', icon: 'pen', keys: 'schets drawing tekening', run: () => N.sketch() },
   ];
 
@@ -834,6 +835,12 @@
     const d = new Date();
     const part = (o) => new Intl.DateTimeFormat(undefined, o).format(d);
     return `${part({ weekday: 'long' })}, ${d.getDate()} ${part({ month: 'long' })} ${d.getFullYear()}`;
+  }
+
+  // "09:05": hour and minute, 24-hour clock.
+  function nowText() {
+    const d = new Date();
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
   }
 
   let slash = null; // { node, offset, query, items, index, el }
