@@ -39,7 +39,7 @@ Section: editors
 Priority: optional
 Architecture: all
 Depends: python3 (>= 3.9), python3-gi, gir1.2-gtk-3.0, gir1.2-webkit2-4.1
-Recommends: fonts-inter
+Recommends: fonts-inter, gstreamer1.0-plugins-good
 Installed-Size: $SIZE
 Maintainer: Lander Claes <183724844+claeslander@users.noreply.github.com>
 Description: Notes app with checklists, tables, sketches and locked notes

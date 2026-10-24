@@ -172,6 +172,7 @@
     }
     apply(snap) {
       root.innerHTML = snap.html;
+      hydrateAudio(root);
       restoreSelection(snap.sel);
       markDirty();
     }
@@ -199,6 +200,8 @@
     ed.setAttribute('contenteditable', readOnly ? 'false' : 'true');
     ed.spellcheck = true;
     ed.innerHTML = body && body.trim() ? body : E.initialHtml();
+    stopAudio();
+    hydrateAudio(ed);
     document.getElementById('editor').replaceWith(ed);
     root = ed;
     dirty = false;
@@ -216,6 +219,7 @@
 
   E.unmount = function () {
     closeSlash();
+    stopAudio();
     clearTimeout(saveTimer);
     note = null;
     readOnly = true;
@@ -705,6 +709,123 @@
       '</span></a></div>';
   }
 
+  // ---------------------------------------------------------------- audio
+
+  // Audio files show as a voice message: play button, waveform, duration. The note stores only the
+  // file link, its duration and the waveform's bar heights; hydrateAudio() builds the player from those.
+  const AUDIO_EXT = /\.(mp3|m4a|aac|wav|ogg|oga|opus|flac)$/i;
+  const AUDIO_BARS = 40;
+  const isAudio = (f) => f.type.startsWith('audio/') || AUDIO_EXT.test(f.name);
+  let audioCtx = null;
+  let player = null;    // { audio, card }
+
+  function audioCard(name, uri, info) {
+    return `<div><a class="nt-file nt-audio" contenteditable="false" href="${N.esc(uri)}" title="${N.esc(name)}" ` +
+      `data-duration="${info.duration.toFixed(2)}" data-peaks="${info.peaks.join(',')}"></a></div>`;
+  }
+
+  const readUri = (uri) => new Promise((resolve, reject) => {
+    const x = new XMLHttpRequest();
+    x.open('GET', uri);
+    x.responseType = 'arraybuffer';
+    x.onload = () => resolve(x.response);
+    x.onerror = () => reject(new Error('read failed'));
+    x.send();
+  });
+
+  // Duration and per-bar loudness. Falls back to the media element's duration and a flat waveform.
+  async function analyseAudio({ file, uri }) {
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const buf = await audioCtx.decodeAudioData(await (file ? file.arrayBuffer() : readUri(uri)));
+      const data = buf.getChannelData(0);
+      const step = Math.max(1, Math.floor(data.length / AUDIO_BARS));
+      const rms = [];
+      for (let b = 0; b < AUDIO_BARS; b++) {
+        let sum = 0;
+        const end = Math.min(data.length, (b + 1) * step);
+        for (let i = b * step; i < end; i += 16) sum += data[i] * data[i];
+        rms.push(Math.sqrt(sum / Math.max(1, (end - b * step) / 16)));
+      }
+      const max = Math.max(...rms) || 1;
+      return { duration: buf.duration, peaks: rms.map((v) => Math.round(15 + 85 * v / max)) };
+    } catch (_) {
+      const duration = await new Promise((resolve) => {
+        const a = new Audio();
+        a.preload = 'metadata';
+        a.onloadedmetadata = () => resolve(isFinite(a.duration) ? a.duration : 0);
+        a.onerror = () => resolve(0);
+        a.src = uri;
+      });
+      return { duration, peaks: Array(AUDIO_BARS).fill(30) };
+    }
+  }
+
+  const clock = (s) => { s = Math.max(0, Math.round(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+
+  function hydrateAudio(scope) {
+    for (const card of scope.querySelectorAll('a.nt-audio')) {
+      const peaks = (card.dataset.peaks || '').split(',').map(Number).filter((n) => n > 0);
+      const bars = (peaks.length ? peaks : Array(AUDIO_BARS).fill(30))
+        .map((h) => `<span class="nt-audio-bar" style="height:${N.clamp(h, 8, 100)}%"></span>`).join('');
+      card.classList.remove('playing');
+      card.setAttribute('contenteditable', 'false');
+      card.innerHTML = `<span class="nt-audio-play">${N.icon('play')}</span><span class="nt-audio-wave">${bars}</span>` +
+        `<span class="nt-audio-time" data-time="${clock(+card.dataset.duration)}"></span>`;
+      if (player && (player.card === card || (!player.card.isConnected && player.card.getAttribute('href') === card.getAttribute('href')))) {
+        player.card = card;
+        showAudio();
+      }
+    }
+  }
+
+  function showAudio() {
+    const { audio, card } = player;
+    if (!card.isConnected) { stopAudio(); return; }
+    const duration = isFinite(audio.duration) ? audio.duration : +card.dataset.duration || 0;
+    const done = duration ? audio.currentTime / duration : 0;
+    card.classList.toggle('playing', !audio.paused);
+    card.querySelector('.nt-audio-play').innerHTML = N.icon(audio.paused ? 'play' : 'pause');
+    const bars = card.querySelectorAll('.nt-audio-bar');
+    bars.forEach((b, i) => b.classList.toggle('on', (i + 0.5) / bars.length <= done));
+    card.querySelector('.nt-audio-time').dataset.time = clock(audio.currentTime > 0 ? audio.currentTime : duration);
+  }
+
+  function stopAudio() {
+    if (!player) return;
+    const { audio, card } = player;
+    player = null;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+    if (card.isConnected) hydrateAudio(card.parentNode);
+  }
+
+  // Click the button to play or pause, click the waveform to jump there.
+  function onAudioClick(card, e) {
+    if (!player || player.card !== card) {
+      stopAudio();
+      const audio = new Audio(card.getAttribute('href'));
+      player = { audio, card };
+      for (const ev of ['play', 'pause', 'timeupdate', 'seeked']) audio.addEventListener(ev, () => { if (player && player.audio === audio) showAudio(); });
+      audio.addEventListener('ended', () => { if (player && player.audio === audio) stopAudio(); });
+      audio.addEventListener('error', () => {
+        if (!player || player.audio !== audio) return;
+        stopAudio();
+        N.ui.toast("Couldn't play this audio file");
+      });
+    }
+    const { audio } = player;
+    const wave = e.target.closest('.nt-audio-wave');
+    if (wave) {
+      const r = wave.getBoundingClientRect();
+      const seek = () => { audio.currentTime = N.clamp((e.clientX - r.left) / r.width, 0, 1) * audio.duration; };
+      if (audio.readyState >= 1) seek(); else audio.addEventListener('loadedmetadata', seek, { once: true });
+      if (audio.paused) audio.play().catch(() => {});
+    } else if (audio.paused) audio.play().catch(() => {});
+    else audio.pause();
+  }
+
   E.saveRange = function () {
     const r = rangeInEditor() || savedRange;
     return r ? r.cloneRange() : null;
@@ -718,24 +839,36 @@
     } else if (!rangeInEditor()) placeCaretAtEnd(root);
   }
 
+  // Files from the page itself (paste, drag & drop of in-memory files): stored first, then inserted.
   E.insertFiles = async function (files, range) {
     if (readOnly || !files.length) return;
     range = range || E.saveRange();
-    let html = '';
+    const items = [];
     for (const f of files) {
       try {
         const res = await N.call('saveAttachment', f.name, await N.fileToBase64(f));
-        html += f.type.startsWith('image/')
-          ? `<div><img class="nt-img" src="${N.esc(res.uri)}" alt=""></div>`
-          : fileCard(f.name, res.size, res.uri);
+        items.push({ name: f.name, type: f.type, uri: res.uri, size: res.size, file: f });
       } catch (err) {
         N.ui.toast(`Couldn't attach ${f.name}`);
       }
     }
-    if (!html) return;
+    await E.insertAttachments(items, range);
+  };
+
+  // Attachments already in the attachments folder: { name, type, uri, size }.
+  E.insertAttachments = async function (items, range) {
+    if (readOnly || !items.length) return;
+    range = range || E.saveRange();
+    let html = '';
+    for (const it of items) {
+      if (it.type.startsWith('image/')) html += `<div><img class="nt-img" src="${N.esc(it.uri)}" alt=""></div>`;
+      else if (isAudio(it)) html += audioCard(it.name, it.uri, await analyseAudio(it));
+      else html += fileCard(it.name, it.size, it.uri);
+    }
     useRange(range);
     history.commit();
     exec('insertHTML', html + '<div><br></div>');
+    hydrateAudio(root);
     E.changed();
     history.commit();
   };
@@ -1051,12 +1184,13 @@
     let clean = html ? N.convert.sanitize(html) : '';
     const probe = document.createElement('div');
     probe.innerHTML = clean;
-    const htmlHasContent = !!(probe.textContent.trim() || probe.querySelector('table, img'));
+    const htmlHasContent = !!(probe.textContent.trim() || probe.querySelector('table, img, .nt-file'));
     // A bare image (screenshots, images copied from a browser) is stored as an attachment.
     if (files.length && !(htmlHasContent && probe.textContent.trim())) { E.insertFiles(files); return; }
     history.commit();
     if (htmlHasContent) {
       insertPastedHtml(clean);
+      hydrateAudio(root);
       if (root.querySelector('img[src^="data:image/"]')) convertDataImages();
     } else if (text) {
       const t = text.trim();
@@ -1192,6 +1326,7 @@
     const a = e.target.closest && e.target.closest('a[href]');
     if (a && root.contains(a)) {
       e.preventDefault();
+      if (a.classList.contains('nt-audio')) { onAudioClick(a, e); return; }
       if (!sel().isCollapsed && !a.classList.contains('nt-file')) return;
       N.send('openExternal', a.getAttribute('href'));
     }
@@ -1204,17 +1339,38 @@
 
   function onDragOver(e) {
     if (readOnly || !e.dataTransfer) return;
-    if (Array.from(e.dataTransfer.types).includes('Files')) {
+    const types = Array.from(e.dataTransfer.types);
+    if (types.includes('Files') || types.includes('text/uri-list')) {
       e.preventDefault();
       e.dataTransfer.dropEffect = 'copy';
     }
   }
 
-  function onDrop(e) {
-    if (readOnly || !e.dataTransfer || !e.dataTransfer.files.length) return;
-    e.preventDefault();
+  // WebKitGTK gives files dragged from the file manager only as file:// URIs; Python copies them in.
+  // Other URIs (links dragged from a browser) keep the default drop.
+  async function onDrop(e) {
+    if (readOnly || !e.dataTransfer) return;
+    N.send('log', 'DROPDEBUG', Array.from(e.dataTransfer.types).join('|'), e.dataTransfer.files.length, JSON.stringify(e.dataTransfer.getData('text/uri-list')), JSON.stringify(e.dataTransfer.getData('text/html')).slice(0, 300));
     const pos = document.caretRangeFromPoint(e.clientX, e.clientY);
-    E.insertFiles(Array.from(e.dataTransfer.files), pos && root.contains(pos.startContainer) ? pos : null);
+    const range = pos && root.contains(pos.startContainer) ? pos : null;
+    if (e.dataTransfer.files.length) {
+      e.preventDefault();
+      E.insertFiles(Array.from(e.dataTransfer.files), range);
+      return;
+    }
+    const uris = (e.dataTransfer.getData('text/uri-list') || '').split(/\r?\n/)
+      .map((s) => s.trim()).filter((s) => /^file:\/\//i.test(s));
+    if (!uris.length) return;
+    e.preventDefault();
+    const items = [];
+    for (const uri of uris) {
+      try {
+        items.push(await N.call('copyAttachment', uri));
+      } catch (err) {
+        N.ui.toast(`Couldn't attach ${decodeURIComponent(uri.split('/').pop())}`);
+      }
+    }
+    E.insertAttachments(items, range);
   }
 
   // ------------------------------------------------------------ highlights

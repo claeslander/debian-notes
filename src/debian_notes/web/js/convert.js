@@ -15,7 +15,7 @@
   // Dropped with their content. <object>/<embed> are *unwrapped* instead: Apple Notes wraps tables in <object>.
   const DROP = new Set(['SCRIPT', 'STYLE', 'META', 'LINK', 'TITLE', 'HEAD', 'NOSCRIPT', 'IFRAME', 'SVG',
     'CANVAS', 'VIDEO', 'AUDIO', 'FORM', 'INPUT', 'BUTTON', 'SELECT', 'TEXTAREA', 'TEMPLATE', 'COLGROUP', 'COL']);
-  const KEEP_CLASSES = new Set(['nt-missing', 'checklist', 'dashed', 'bullet', 'nt-table', 'nt-img', 'nt-sketch', 'nt-file',
+  const KEEP_CLASSES = new Set(['nt-missing', 'checklist', 'dashed', 'bullet', 'nt-table', 'nt-img', 'nt-sketch', 'nt-file', 'nt-audio',
     'nt-file-icon', 'nt-file-meta', 'nt-file-name', 'nt-file-size']);
   // U+FFFC marks an attachment (table, image, drawing) in Apple's text; it renders as an "OBJ" box.
   const JUNK_CHARS = /[\uFFFC\uFFFD\u200B\u2028\u2029]/g;
@@ -45,7 +45,7 @@
       while (parent.firstChild !== el) before.appendChild(parent.firstChild);
       parent.removeChild(el);
       while (parent.firstChild) after.appendChild(parent.firstChild);
-      const keep = (d) => d.textContent.trim() || d.querySelector('img');
+      const keep = (d) => d.textContent.trim() || d.querySelector('img, .nt-file');
       parent.replaceWith(...[keep(before) && before, el, keep(after) && after].filter(Boolean));
     }
     root.querySelectorAll('div').forEach((d) => { if (!d.firstChild) d.remove(); });
@@ -166,6 +166,10 @@
         if (tag === 'ul' && /check|todo/i.test(node.className)) el.className = 'checklist';
         if (tag === 'li') markChecklistItem(node, el);
         if (node.getAttribute('contenteditable') === 'false' && cls.includes('nt-file')) el.setAttribute('contenteditable', 'false');
+        // Audio cards keep what the editor rebuilds their player from.
+        if (cls.includes('nt-audio')) {
+          for (const k of ['title', 'data-duration', 'data-peaks']) if (node.hasAttribute(k)) el.setAttribute(k, node.getAttribute(k));
+        }
         if (tag === 'table') el.className = 'nt-table';
         if (/^(div|h1|h2|h3)$/.test(tag) && MONO_FONT.test(node.style.fontFamily || '')) el = document.createElement('pre');
       }
@@ -435,7 +439,7 @@
       case 'S': case 'STRIKE': case 'DEL': return wrap(inner(), '~~');
       case 'U': return `<u>${inner()}</u>`;
       case 'A': return node.classList.contains('nt-file')
-        ? `[${node.querySelector('.nt-file-name')?.textContent || 'Attachment'}](${node.getAttribute('href')})`
+        ? `[${node.querySelector('.nt-file-name')?.textContent || node.getAttribute('title') || 'Attachment'}](${node.getAttribute('href')})`
         : `[${inner()}](${node.getAttribute('href')})`;
       case 'IMG': return `![](${node.getAttribute('src')})`;
       case 'BR': return '\n';
@@ -559,6 +563,16 @@
   // ------------------------------------------------------------ html export
 
   C.toHtmlDocument = function (title, bodyHtml) {
+    // The editor's player needs its scripts; an exported page gets the browser's own.
+    const tmp = document.createElement('div');
+    tmp.innerHTML = bodyHtml;
+    for (const a of tmp.querySelectorAll('a.nt-audio')) {
+      const audio = document.createElement('audio');
+      audio.controls = true;
+      audio.setAttribute('src', a.getAttribute('href'));
+      a.replaceWith(audio);
+    }
+    bodyHtml = tmp.innerHTML;
     return `<!doctype html>
 <html><head><meta charset="utf-8"><title>${N.esc(title || 'Note')}</title>
 <style>

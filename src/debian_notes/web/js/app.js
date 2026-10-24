@@ -1007,23 +1007,20 @@
     sync();
   }
 
-  function pickFiles(accept, cb) {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    if (accept) input.accept = accept;
-    input.addEventListener('change', () => cb(Array.from(input.files)));
-    input.click();
+  // The GTK file chooser, run from Python: it copies the chosen files into the attachments folder.
+  async function pickFiles(imagesOnly, range) {
+    range = range || N.editor.saveRange();
+    N.editor.insertAttachments(await N.call('chooseAttachments', imagesOnly), range);
   }
 
-  A.insertPhotos = () => { const range = N.editor.saveRange(); pickFiles('image/*', (f) => N.editor.insertFiles(f, range)); };
-  A.attachFile = () => { const range = N.editor.saveRange(); pickFiles('', (f) => N.editor.insertFiles(f, range)); };
+  A.insertPhotos = () => pickFiles(true);
+  A.attachFile = () => pickFiles(false);
 
   function mediaMenu(anchor) {
     const range = N.editor.saveRange();
     N.ui.menuFor(anchor, [
-      { label: 'Photos…', icon: 'photo', action: () => pickFiles('image/*', (f) => N.editor.insertFiles(f, range)) },
-      { label: 'Attach File…', icon: 'paperclip', action: () => pickFiles('', (f) => N.editor.insertFiles(f, range)) },
+      { label: 'Photos…', icon: 'photo', action: () => pickFiles(true, range) },
+      { label: 'Attach File…', icon: 'paperclip', action: () => pickFiles(false, range) },
       '-',
       { label: 'Sketch', icon: 'pen', action: () => N.sketch() },
     ]);

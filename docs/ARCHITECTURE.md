@@ -76,7 +76,7 @@ graph TD
 | Title / Heading / Subheading / Body / Monostyled, B I U S, colours | ✅ |
 | Bulleted, dashed, numbered lists; checklists; sort checked to bottom | ✅ |
 | Tables (add/remove rows and columns, Tab navigation) | ✅ |
-| Images, attachments, sketches, drag & drop and paste | ✅ |
+| Images, attachments, sketches, audio files as voice messages, drag & drop and paste | ✅ |
 | Tags, search with highlights | ✅ |
 | Locked notes with password and hint | ✅ |
 | Export / print / import | ✅ |

@@ -6,6 +6,7 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import sys
 import traceback
 import uuid
@@ -235,13 +236,38 @@ class Api:
 
     # ---------------------------------------------------------- attachments
 
-    def saveAttachment(self, name, data_b64):
+    def _attachment_path(self, name):
         base = os.path.basename(name or "attachment")
         base = re.sub(r"[^\w.\- ]+", "_", base).strip() or "attachment"
-        path = os.path.join(self.store.attachments_dir, f"{uuid.uuid4().hex[:12]}-{base}")
+        return os.path.join(self.store.attachments_dir, f"{uuid.uuid4().hex[:12]}-{base}")
+
+    def saveAttachment(self, name, data_b64):
+        path = self._attachment_path(name)
         with open(path, "wb") as fh:
             fh.write(base64.b64decode(data_b64))
         return {"uri": GLib.filename_to_uri(path), "size": os.path.getsize(path)}
+
+    def copyAttachment(self, uri):
+        """Copy a file dropped from the file manager (WebKitGTK hands the page only its file:// URI)."""
+        src = GLib.filename_from_uri(uri)[0]
+        if not os.path.isfile(src):
+            raise ValueError(f"not a file: {src}")
+        name = os.path.basename(src)
+        path = self._attachment_path(name)
+        shutil.copyfile(src, path)
+        return {"name": name, "type": mimetypes.guess_type(name)[0] or "", "uri": GLib.filename_to_uri(path),
+                "size": os.path.getsize(path)}
+
+    def chooseAttachments(self, images_only=False):
+        paths = self.win.choose_open_paths("Add Photos" if images_only else "Attach File", "_Add",
+                                           "image" if images_only else None)
+        out = []
+        for path in paths:
+            try:
+                out.append(self.copyAttachment(GLib.filename_to_uri(path)))
+            except (OSError, ValueError) as exc:
+                self.log("attach failed", path, exc)
+        return out
 
     def openExternal(self, uri):
         if not re.match(r"^(https?|mailto|file|tel):", uri, re.I):
@@ -301,7 +327,7 @@ class Api:
             mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
             return f'{m.group(1)}"data:{mime};base64,{data}"'
 
-        return re.sub(r'(<img[^>]*?\ssrc=)"([^"]+)"', repl, html)
+        return re.sub(r'(<(?:img|audio)[^>]*?\ssrc=)"([^"]+)"', repl, html)
 
     # ---------------------------------------------------------------- iCloud
 
@@ -542,6 +568,7 @@ class NotesWindow(Gtk.ApplicationWindow):
         # Pop-ups (Apple's sign-in, share sheets) stay in this view.
         view.connect("create", lambda v, action: (v.load_request(action.get_request()), None)[1])
         view.connect("load-changed", self._on_icloud_load)
+        view.connect("load-failed", self._on_icloud_load_failed)
         view.set_halign(Gtk.Align.FILL)
         view.set_valign(Gtk.Align.FILL)
         view.set_no_show_all(True)
@@ -564,6 +591,34 @@ class NotesWindow(Gtk.ApplicationWindow):
         if event == WebKit2.LoadEvent.FINISHED and not self.icloud_ready:
             # Never keep it hidden for long, whatever the page does.
             GLib.timeout_add_seconds(9, lambda: (self._icloud_is_ready(), False)[1])
+
+    def _on_icloud_load_failed(self, _view, _event, uri, error):
+        """No network yet (the app started at login before Wi-Fi was up) or it dropped: load the page again as
+        soon as the network is back, and every few seconds in case that is never reported."""
+        if error.matches(WebKit2.NetworkError.quark(), WebKit2.NetworkError.CANCELLED) or \
+                error.matches(WebKit2.PolicyError.quark(), WebKit2.PolicyError.FRAME_LOAD_INTERRUPTED_BY_POLICY_CHANGE):
+            return False  # replaced by another load, not a failure
+        self._icloud_failed_uri = uri
+        if not getattr(self, "_icloud_retry_hooked", False):
+            self._icloud_retry_hooked = True
+            Gio.NetworkMonitor.get_default().connect(
+                "network-changed", lambda _m, available: available and self._retry_icloud())
+        if not getattr(self, "_icloud_retry_timer", 0):
+            self._icloud_retry_timer = GLib.timeout_add_seconds(5, self._on_icloud_retry_timer)
+        return False  # WebKit shows its error page meanwhile
+
+    def _on_icloud_retry_timer(self):
+        self._icloud_retry_timer = 0
+        return self._retry_icloud()
+
+    def _retry_icloud(self):
+        uri, self._icloud_failed_uri = getattr(self, "_icloud_failed_uri", None), None
+        if getattr(self, "_icloud_retry_timer", 0):
+            GLib.source_remove(self._icloud_retry_timer)
+            self._icloud_retry_timer = 0
+        if uri and self.icloud_view is not None:
+            self.icloud_view.load_uri(uri)
+        return False
 
     def _poll_icloud_ready(self):
         if self.icloud_ready or self.icloud_view is None:
@@ -894,14 +949,19 @@ class NotesWindow(Gtk.ApplicationWindow):
         dialog.destroy()
         return path
 
-    def choose_open_paths(self, title):
-        dialog = Gtk.FileChooserNative.new(title, self, Gtk.FileChooserAction.OPEN, "_Import", "_Cancel")
+    def choose_open_paths(self, title, accept="_Import", kind="text"):
+        dialog = Gtk.FileChooserNative.new(title, self, Gtk.FileChooserAction.OPEN, accept, "_Cancel")
         dialog.set_select_multiple(True)
         flt = Gtk.FileFilter()
-        flt.set_name("Text, Markdown and HTML")
-        for pattern in ("*.txt", "*.md", "*.markdown", "*.html", "*.htm", "*.TXT", "*.MD", "*.HTML"):
-            flt.add_pattern(pattern)
-        dialog.add_filter(flt)
+        if kind == "text":
+            flt.set_name("Text, Markdown and HTML")
+            for pattern in ("*.txt", "*.md", "*.markdown", "*.html", "*.htm", "*.TXT", "*.MD", "*.HTML"):
+                flt.add_pattern(pattern)
+        elif kind == "image":
+            flt.set_name("Images")
+            flt.add_mime_type("image/*")
+        if kind:
+            dialog.add_filter(flt)
         paths = dialog.get_filenames() if dialog.run() == Gtk.ResponseType.ACCEPT else []
         dialog.destroy()
         return paths

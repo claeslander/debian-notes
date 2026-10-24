@@ -59,6 +59,8 @@
     calendar: S('<rect x="3.5" y="5" width="17" height="15" rx="2.5"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/>'),
     clock: S('<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>'),
     paperclip: S('<path d="M18.5 11.5l-6.4 6.4a4.2 4.2 0 0 1-6-6l7-7a2.8 2.8 0 0 1 4 4l-7 7a1.4 1.4 0 0 1-2-2l6.4-6.4"/>'),
+    play: S('<path d="M7 5.2v13.6a.8.8 0 0 0 1.2.7l10.6-6.8a.8.8 0 0 0 0-1.4L8.2 4.5A.8.8 0 0 0 7 5.2z" fill="currentColor" stroke="none"/>'),
+    pause: S('<rect x="6.5" y="5" width="4" height="14" rx="1.2" fill="currentColor" stroke="none"/><rect x="13.5" y="5" width="4" height="14" rx="1.2" fill="currentColor" stroke="none"/>'),
     file: S('<path d="M14 3.5H7.5A2 2 0 0 0 5.5 5.5v13a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V8z"/><path d="M14 3.5V8h4.5"/>'),
     check: S('<path d="M5 12.5l4.5 4.5L19 7.5" stroke-width="2"/>'),
     rowAbove: S('<rect x="4" y="11" width="16" height="9" rx="2"/><path d="M12 3v6M9 6h6"/>'),
