@@ -817,10 +817,16 @@
     { id: 'subheading', label: 'Subheading', icon: 'textSub', keys: 'subkop h3', run: () => E.setStyle('subheading') },
     { id: 'body', label: 'Body', icon: 'textBody', keys: 'text tekst normal paragraph', run: () => E.setStyle('body') },
     { id: 'mono', label: 'Monostyled', icon: 'textMono', keys: 'code monospace', run: () => E.setStyle('mono') },
+    { id: 'bold', label: 'Bold', icon: 'textBold', keys: 'vet b', run: () => E.toggleInline('bold') },
+    { id: 'italic', label: 'Italic', icon: 'textItalic', keys: 'cursief schuin i', run: () => E.toggleInline('italic') },
+    { id: 'underline', label: 'Underline', icon: 'textUnderline', keys: 'onderstreept u', run: () => E.toggleInline('underline') },
+    { id: 'strike', label: 'Strikethrough', icon: 'textStrike', keys: 'doorstreept doorhalen s', run: () => E.toggleInline('strike') },
     { id: 'checklist', label: 'Checklist', icon: 'checklist', keys: 'todo task taken vinkje', run: () => E.toggleList('checklist') },
     { id: 'bullet', label: 'Bulleted List', icon: 'bulleted', keys: 'lijst list ul', run: () => E.toggleList('bullet') },
     { id: 'dashed', label: 'Dashed List', icon: 'dashed', keys: 'lijst list streepjes', run: () => E.toggleList('dashed') },
     { id: 'numbered', label: 'Numbered List', icon: 'numbered', keys: 'lijst list ol genummerd', run: () => E.toggleList('numbered') },
+    { id: 'indent', label: 'Indent', icon: 'indent', keys: 'inspringen tab', run: () => E.indent() },
+    { id: 'outdent', label: 'Outdent', icon: 'outdent', keys: 'uitspringen', run: () => E.outdent() },
     { id: 'quote', label: 'Block Quote', icon: 'quote', keys: 'citaat blockquote', run: () => E.toggleQuote() },
     { id: 'table', label: 'Table', icon: 'table', keys: 'tabel grid', run: () => E.insertTable() },
     { id: 'image', label: 'Photo…', icon: 'photo', keys: 'image afbeelding foto picture', run: () => N.app.insertPhotos() },
@@ -880,7 +886,6 @@
     slash.query = query;
     slash.items = slashMatches(query.trim());
     slash.index = Math.min(slash.index, Math.max(0, slash.items.length - 1));
-    if (!slash.items.length) { closeSlash(); return; }
     renderSlash();
   }
 
@@ -899,6 +904,9 @@
       });
       document.getElementById('overlay-root').appendChild(slash.el);
     }
+    // A typo hides the menu without ending it, so Backspace brings the options back.
+    slash.el.hidden = !slash.items.length;
+    if (slash.el.hidden) return;
     slash.el.innerHTML = '<div class="menu-header">Basic blocks</div>' + slash.items.map((c, i) =>
       `<div class="menu-item${i === slash.index ? ' active' : ''}" data-i="${i}">` +
       `<span class="menu-icon">${N.icon(c.icon)}</span><span class="menu-label">${N.esc(c.label)}</span></div>`).join('');
@@ -942,10 +950,11 @@
   function slashKey(e) {
     if (!slash) return false;
     const n = slash.items.length;
+    if (e.key === 'Escape' && n) { e.preventDefault(); e.stopPropagation(); closeSlash(); return true; }
+    if (!n) { if (e.key === 'Escape') closeSlash(); return false; }
     if (e.key === 'ArrowDown') slash.index = (slash.index + 1) % n;
     else if (e.key === 'ArrowUp') slash.index = (slash.index - 1 + n) % n;
     else if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); runSlash(slash.index); return true; }
-    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeSlash(); return true; }
     else return false;
     e.preventDefault();
     renderSlash();
