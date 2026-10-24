@@ -825,8 +825,16 @@
     { id: 'table', label: 'Table', icon: 'table', keys: 'tabel grid', run: () => E.insertTable() },
     { id: 'image', label: 'Photo…', icon: 'photo', keys: 'image afbeelding foto picture', run: () => N.app.insertPhotos() },
     { id: 'file', label: 'Attach File…', icon: 'paperclip', keys: 'bestand bijlage attachment', run: () => N.app.attachFile() },
+    { id: 'date', label: 'Date', icon: 'calendar', keys: 'datum today vandaag', run: () => exec('insertText', todayText()) },
     { id: 'sketch', label: 'Sketch', icon: 'pen', keys: 'schets drawing tekening', run: () => N.sketch() },
   ];
+
+  // "Saturday, 24 October 2026": day name, day number, month name, year.
+  function todayText() {
+    const d = new Date();
+    const part = (o) => new Intl.DateTimeFormat(undefined, o).format(d);
+    return `${part({ weekday: 'long' })}, ${d.getDate()} ${part({ month: 'long' })} ${d.getFullYear()}`;
+  }
 
   let slash = null; // { node, offset, query, items, index, el }
 
