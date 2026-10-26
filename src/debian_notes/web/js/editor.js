@@ -950,10 +950,10 @@
     { id: 'subheading', label: 'Subheading', icon: 'textSub', keys: 'subkop h3', run: () => E.setStyle('subheading') },
     { id: 'body', label: 'Body', icon: 'textBody', keys: 'text tekst normal paragraph', run: () => E.setStyle('body') },
     { id: 'mono', label: 'Monostyled', icon: 'textMono', keys: 'code monospace', run: () => E.setStyle('mono') },
-    { id: 'bold', label: 'Bold', icon: 'textBold', keys: 'vet b', run: () => E.toggleInline('bold') },
-    { id: 'italic', label: 'Italic', icon: 'textItalic', keys: 'cursief schuin i', run: () => E.toggleInline('italic') },
-    { id: 'underline', label: 'Underline', icon: 'textUnderline', keys: 'onderstreept u', run: () => E.toggleInline('underline') },
-    { id: 'strike', label: 'Strikethrough', icon: 'textStrike', keys: 'doorstreept doorhalen s', run: () => E.toggleInline('strike') },
+    { id: 'bold', label: 'Bold', icon: 'textBold', keys: 'vet b', inline: 'bold' },
+    { id: 'italic', label: 'Italic', icon: 'textItalic', keys: 'cursief schuin i', inline: 'italic' },
+    { id: 'underline', label: 'Underline', icon: 'textUnderline', keys: 'onderstreept u', inline: 'underline' },
+    { id: 'strike', label: 'Strikethrough', icon: 'textStrike', keys: 'doorstreept doorhalen s', inline: 'strike' },
     { id: 'checklist', label: 'Checklist', icon: 'checklist', keys: 'todo task taken vinkje', run: () => E.toggleList('checklist') },
     { id: 'bullet', label: 'Bulleted List', icon: 'bulleted', keys: 'lijst list ul', run: () => E.toggleList('bullet') },
     { id: 'dashed', label: 'Dashed List', icon: 'dashed', keys: 'lijst list streepjes', run: () => E.toggleList('dashed') },
@@ -986,10 +986,13 @@
 
   const slashEnabled = () => !!(N.state && N.state.settings.slashCommands);
 
-  function slashMatches(query) {
+  const INLINE_STATE = { bold: 'bold', italic: 'italic', underline: 'underline', strike: 'strikeThrough' };
+  const inlineOn = (kind) => { try { return document.queryCommandState(INLINE_STATE[kind]); } catch (_) { return false; } };
+
+  function slashMatches(query, all = SLASH_COMMANDS) {
     const q = query.toLowerCase();
-    if (!q) return SLASH_COMMANDS;
-    return SLASH_COMMANDS.filter((c) => c.label.toLowerCase().includes(q) || c.id.includes(q) ||
+    if (!q) return all;
+    return all.filter((c) => c.label.toLowerCase().includes(q) || c.id.includes(q) ||
       c.keys.split(' ').some((k) => k.startsWith(q)))
       .sort((a, b) => (b.label.toLowerCase().startsWith(q) - a.label.toLowerCase().startsWith(q)));
   }
@@ -1001,10 +1004,15 @@
     const node = r.startContainer;
     const offset = r.startOffset - 1;
     const before = node.nodeValue.slice(0, offset);
-    // Only at the start of a line or after whitespace, so URLs and dates like 1/2 don't trigger it.
-    if (before && !/\s$/.test(before)) return;
     if (closestIn(node, 'pre, a')) return;
-    slash = { node, offset, query: '', items: SLASH_COMMANDS, index: 0, el: null };
+    // At the start of a line or after whitespace. Right after a word ("schuin/italic") it only offers to end
+    // the bold/italic/... you are typing in, so URLs, dates like 1/2 and km/u never open it.
+    let all = SLASH_COMMANDS;
+    if (before && !/\s$/.test(before)) {
+      all = SLASH_COMMANDS.filter((c) => c.inline && inlineOn(c.inline));
+      if (!all.length) return;
+    }
+    slash = { node, offset, query: '', all, items: all, index: 0, el: null };
     renderSlash();
   }
 
@@ -1015,9 +1023,12 @@
     if (!r || !r.collapsed || r.startContainer !== node || !node.isConnected || r.startOffset <= offset ||
         node.nodeValue[offset] !== '/') { closeSlash(); return; }
     const query = node.nodeValue.slice(offset + 1, r.startOffset);
-    if (/\s{2}|^\s/.test(query) || query.length > 24) { closeSlash(); return; }
+    if (/\s{2}|^\s/.test(query) || query.length > 24 || (slash.all !== SLASH_COMMANDS && /\s/.test(query))) {
+      closeSlash();
+      return;
+    }
     slash.query = query;
-    slash.items = slashMatches(query.trim());
+    slash.items = slashMatches(query.trim(), slash.all);
     slash.index = Math.min(slash.index, Math.max(0, slash.items.length - 1));
     renderSlash();
   }
@@ -1067,6 +1078,8 @@
     const { node, offset } = slash;
     const r = rangeInEditor();
     const end = r && r.startContainer === node ? r.startOffset : offset + 1 + slash.query.length;
+    // The typed "/query" carries the current style: that tells whether the command turns it on or off.
+    const wasOn = cmd.inline && inlineOn(cmd.inline);
     closeSlash();
     // Remove the typed "/query", then run the command where it was.
     const del = document.createRange();
@@ -1076,7 +1089,14 @@
     sel().addRange(del);
     document.execCommand('delete', false, null);
     history.commit();
-    cmd.run();
+    if (cmd.inline) setInline(cmd.inline, !wasOn);
+    else cmd.run();
+  }
+
+  // An emptied line reports a style as off while WebKit still types in it, so "off" is set twice to make it stick.
+  function setInline(kind, on) {
+    if (inlineOn(kind) !== on) E.toggleInline(kind);
+    else if (!on) { E.toggleInline(kind); E.toggleInline(kind); }
   }
 
   // Returns true when the key was consumed by the open menu.
