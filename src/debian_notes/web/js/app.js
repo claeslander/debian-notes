@@ -69,7 +69,17 @@
   }
 
   N.onSystemTheme = (t) => { S.systemTheme = t; applyTheme(); };
-  N.onWindowActive = (active) => body.classList.toggle('window-inactive', !active);
+  N.onWindowActive = (active) => {
+    body.classList.toggle('window-inactive', !active);
+    if (!active) veiled = true;
+    applyPrivacy();
+    // Leaving the window also takes the caret out of an open locked note, so you can't type into
+    // it blurred when you come back: a click puts the caret back and reveals it.
+    if (!active && body.classList.contains('privacy-blur') && inNote(document.activeElement)) {
+      document.activeElement.blur();
+      window.getSelection().removeAllRanges();
+    }
+  };
   N.onWindowState = (st) => { body.classList.toggle('maximized', !!st.maximized); updateDragRegionsSoon(); };
 
   // ------------------------------------------------------------ rendering
@@ -190,6 +200,31 @@
     lockBtn.dataset.icon = icon;
     lockBtn.classList.toggle('is-locked', !!(n && n.locked));
     N.renderIcons(lockBtn.parentElement);
+    updatePrivacy();
+  }
+
+  // An open locked note is blurred unless you're working in it. Leaving it (another window, or
+  // focus in the note list, sidebar or search) veils it, and it stays veiled until you click in
+  // it or move focus into it from elsewhere in the window: coming back with Alt+Tab isn't enough.
+  // No transition: WebKit pauses those in an inactive window, which would leave the text readable.
+  let veiled = true;
+  const inNote = (el) => document.getElementById('editor-scroll').contains(el);
+
+  function updatePrivacy(focused = document.activeElement) {
+    if (!inNote(focused)) veiled = true;
+    applyPrivacy();
+  }
+
+  function applyPrivacy() {
+    const n = currentNote();
+    const open = !!n && n.locked && N.editor.noteId() === n.id;
+    body.classList.toggle('privacy-blur', open && veiled);
+  }
+
+  // Not updatePrivacy: on mousedown the caret isn't in the note yet, that happens right after.
+  function revealNote() {
+    veiled = false;
+    applyPrivacy();
   }
 
   function showView(which) {
@@ -1432,6 +1467,12 @@
       e.preventDefault();
     });
     searchInput().addEventListener('input', runSearch);
+    document.addEventListener('focusin', (e) => {
+      if (e.relatedTarget && inNote(e.target)) veiled = false;  // null when the window regains focus
+      updatePrivacy();
+    });
+    document.getElementById('editor-scroll').addEventListener('mousedown', revealNote, true);
+    document.addEventListener('focusout', (e) => updatePrivacy(e.relatedTarget));
     document.getElementById('editor-scroll').addEventListener('dblclick', () => {
       const n = currentNote();
       if (n && n.icloud && !n.deletedAt) A.editInICloud(n.id);  // read-only here: edit it in iCloud
@@ -1442,6 +1483,8 @@
       if (await N.call('unlock', input.value)) {
         S.lock.unlocked = true;
         await openNote(S.currentNoteId);
+        N.editor.focus();  // focus was in the password field: land in the note, unblurred
+        revealNote();
       } else {
         input.value = '';
         const form = e.target;

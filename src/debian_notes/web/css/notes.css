@@ -401,6 +401,7 @@ body.list-focused:not(.window-inactive) .note-list.multi .note-row.selected::aft
 }
 .link-btn { color: var(--accent-text); font-weight: 600; font-size: 12px; }
 .link-btn:hover { text-decoration: underline; }
+body.privacy-blur #editor, body.privacy-blur #table-tools { filter: blur(9px); }
 
 .editor {
   outline: none;
