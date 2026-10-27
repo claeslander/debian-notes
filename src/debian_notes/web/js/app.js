@@ -70,6 +70,7 @@
 
   N.onSystemTheme = (t) => { S.systemTheme = t; applyTheme(); };
   N.onWindowActive = (active) => {
+    if (active) checkAutoLock();
     body.classList.toggle('window-inactive', !active);
     if (!active) veiled = true;
     applyPrivacy();
@@ -954,6 +955,19 @@
     updateToolbar();
   }
 
+  // Unlocked notes lock again after 5 minutes without typing or clicking in Notes.
+  // A timestamp rather than one long timeout: WebKit throttles timers in a hidden window, so the
+  // check also runs when the window comes back.
+  let lastActivity = Date.now();
+  const AUTO_LOCK_MS = 5 * 60000;
+
+  function noteActivity() { lastActivity = Date.now(); }
+
+  function checkAutoLock() {
+    if (!S.lock.unlocked || Date.now() - lastActivity < AUTO_LOCK_MS) return;
+    closeLockedNotes();
+  }
+
   async function changePassword() {
     const r = await N.ui.sheet({
       icon: 'lockLarge',
@@ -1537,6 +1551,8 @@
     initDividers();
     applyLayout();
     document.addEventListener('keydown', onGlobalKey);
+    for (const ev of ['keydown', 'mousedown', 'wheel']) document.addEventListener(ev, noteActivity, true);
+    setInterval(checkAutoLock, 15000);
     window.addEventListener('resize', updateDragRegionsSoon);
     new MutationObserver(updateDragRegionsSoon).observe(document.getElementById('overlay-root'), { childList: true });
 
