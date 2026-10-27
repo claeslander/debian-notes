@@ -1396,6 +1396,7 @@
   // ------------------------------------------------------------ highlights
 
   const hasHighlights = !!(window.CSS && CSS.highlights && window.Highlight);
+  let shownHits = 0;
 
   E.refreshHighlights = function (scrollToMatch) {
     if (!hasHighlights || !root) return;
@@ -1429,6 +1430,14 @@
     }
     CSS.highlights.set('nt-tag', new Highlight(...tags));
     CSS.highlights.set('nt-search', new Highlight(...hits));
+    // WebKitGTK doesn't repaint ranges that leave a highlight, so cleared search hits stayed
+    // on screen: repaint the note once.
+    if (shownHits) {
+      const ed = root;
+      ed.style.opacity = '0.999';
+      setTimeout(() => { ed.style.opacity = ''; }, 0);
+    }
+    shownHits = hits.length;
     if (scrollToMatch && hits.length) {
       const scroller = document.getElementById('editor-scroll');
       const rr = hits[0].getBoundingClientRect();

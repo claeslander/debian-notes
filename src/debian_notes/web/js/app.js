@@ -204,14 +204,14 @@
   }
 
   // An open locked note is blurred unless you're working in it. Leaving it (another window, or
-  // focus in the note list, sidebar or search) veils it, and it stays veiled until you click in
+  // focus in the note list or sidebar) veils it, and it stays veiled until you click in
   // it or move focus into it from elsewhere in the window: coming back with Alt+Tab isn't enough.
   // No transition: WebKit pauses those in an inactive window, which would leave the text readable.
   let veiled = true;
   const inNote = (el) => document.getElementById('editor-scroll').contains(el);
 
   function updatePrivacy(focused = document.activeElement) {
-    if (!inNote(focused)) veiled = true;
+    if (!inNote(focused) && focused !== searchInput()) veiled = true;  // searching keeps the hits in view
     applyPrivacy();
   }
 
@@ -314,6 +314,8 @@
     document.getElementById('trash-banner').hidden = !n.deletedAt;
     document.getElementById('icloud-banner').hidden = !n.icloud || !!n.deletedAt;
     showView('editor');
+    // A note that opens is only readable when the caret lands in it, also when search opens it.
+    veiled = !inNote(document.activeElement);
     document.getElementById('editor-scroll').scrollTop = 0;
     if (S.search) N.editor.refreshHighlights(true);
     updateToolbar();
@@ -846,7 +848,9 @@
     S.search = q;
     document.getElementById('tb-search').classList.toggle('has-text', !!q);
     if (!q) { clearSearch(true); return; }
-    S.searchIds = new Set(await N.call('search', q));
+    const ids = await N.call('search', q);
+    if (S.search !== q) return;  // cleared (Escape) or changed while the search ran
+    S.searchIds = new Set(ids);
     N.sidebar.render();
     N.notelist.render();
     if (!N.notelist.order.includes(S.currentNoteId)) await A.selectNote(N.notelist.order[0] ?? null);
