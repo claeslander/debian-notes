@@ -121,7 +121,13 @@ The full list is under ⋯ → *Keyboard Shortcuts*.
 
 - Local notes are stored only on your computer, in `~/.local/share/debian-notes/` (`notes.db` and an
   `attachments/` folder). There is no account, no telemetry and no server of ours.
-- Locked notes are encrypted with your password; it is never stored.
+- Locked notes are encrypted with your password, photos and attachments included; the password is never stored.
+  Opening an attachment in another app gives that app a decrypted copy in `$XDG_RUNTIME_DIR` (kept in memory),
+  removed when locked notes close.
+- Deleted text is overwritten in the database instead of only being marked free, and locking a note clears its
+  earlier plaintext from the database journal.
+- Notes that aren't locked are stored as plain text. Full-disk encryption protects them if your computer is
+  lost or stolen.
 - For iCloud, your password goes straight to Apple's sign-in page. The app keeps only Apple's session cookies,
   in a folder that only your user can read (`~/.local/share/debian-notes/icloud-web/`).
 

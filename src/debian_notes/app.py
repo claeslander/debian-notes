@@ -9,6 +9,7 @@ import re
 import shutil
 import sys
 import traceback
+import urllib.parse
 import uuid
 
 import gi
@@ -37,6 +38,40 @@ window.notes-window decoration { border-radius: 10px; border: none;
 window.notes-window decoration:backdrop { box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18), 0 0 0 1px rgba(0, 0, 0, 0.08); }
 window.notes-window.maximized decoration { border-radius: 0; }
 """
+
+
+# Attachments of locked notes are stored encrypted and reach the page through this scheme,
+# decrypted in memory while locked notes are open.
+LOCKED_SCHEME = "notes-locked"
+LOCKED_PREFIX = LOCKED_SCHEME + "://attachment/"
+ATTACHMENT_REF = re.compile(r'(\s(?:src|href)=")([^"]+)(")')
+
+
+def open_copies_dir():
+    """Decrypted copies of locked attachments opened in another app. In XDG_RUNTIME_DIR, which is
+    kept in memory, and emptied when locked notes close."""
+    return os.path.join(GLib.get_user_runtime_dir(), "debian-notes-open")
+
+
+def clear_open_copies():
+    shutil.rmtree(open_copies_dir(), ignore_errors=True)
+
+
+def wipe_file(path):
+    """Overwrite a file before removing it, so its contents don't linger on disk."""
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r+b") as fh:
+            while fh.tell() < size:
+                fh.write(bytes(min(1 << 20, size - fh.tell())))
+            fh.flush()
+            os.fsync(fh.fileno())
+    except OSError:
+        traceback.print_exc()
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def data_dir():
@@ -260,8 +295,28 @@ class Api:
         keys = crypto.derive(password, salt)
         if not crypto.check(keys, expected):
             return False
+        first = self.keys is None
         self.keys = keys
+        if first:
+            self._seal_old_locked_notes()
         return True
+
+    def _seal_old_locked_notes(self):
+        """Locked notes from before attachments were encrypted still point at plain files."""
+        originals = []
+        for row in self.store.locked_notes():
+            try:
+                body = crypto.decrypt(self.keys, row["locked_payload"])
+            except ValueError:
+                continue
+            sealed, plain = self._seal_attachments(body)
+            if plain:
+                self.store.update_locked_payload(row["id"], crypto.encrypt(self.keys, sealed))
+                originals += plain
+        if originals:
+            self.store.commit()
+            self.store.flush_journal()
+            self._discard_plain(originals)
 
     def changeLockPassword(self, old, new, hint=""):
         if not self.unlock(old):
@@ -272,30 +327,158 @@ class Api:
         for row in self.store.locked_notes():
             plain = crypto.decrypt(old_keys, row["locked_payload"])
             self.store.update_locked_payload(row["id"], crypto.encrypt(new_keys, plain))
+        # Attachments are rewritten next to the old files first and only swapped in once the notes
+        # are saved with the new password.
+        swaps = []
+        for name in os.listdir(self.store.attachments_dir):
+            path = os.path.join(self.store.attachments_dir, name)
+            if not name.endswith(".locked"):
+                continue
+            try:
+                with open(path, "rb") as fh:
+                    data = crypto.decrypt_bytes(old_keys, fh.read())
+            except (OSError, ValueError):
+                continue
+            with open(path + ".new", "wb") as fh:
+                fh.write(crypto.encrypt_bytes(new_keys, data))
+            swaps.append(path)
         self.store.set_setting("lock.salt", salt)
         self.store.set_setting("lock.verifier", crypto.verifier(new_keys))
         self.store.set_setting("lock.hint", hint)
         self.store.commit()
+        for path in swaps:
+            os.replace(path + ".new", path)
         self.keys = new_keys
         return True
 
     def closeLockedNotes(self):
         self.keys = None
+        clear_open_copies()
 
     def lockNote(self, note_id, data):
         self._writable(note_id)
         if self.keys is None:
             raise PermissionError("locked")
-        self.store.save_note(note_id, data)
-        return self.store.set_locked(note_id, crypto.encrypt(self.keys, data.get("body", "")))
+        body, originals = self._seal_attachments(data.get("body", ""))
+        meta = self.store.set_locked(note_id, crypto.encrypt(self.keys, body), data.get("title", ""))
+        self._discard_plain(originals)
+        return meta
 
     def removeLock(self, note_id):
         if self.keys is None:
             raise PermissionError("locked")
         row = self.store.note_row(note_id)
-        body = crypto.decrypt(self.keys, row["locked_payload"])
+        body = self._unseal_attachments(crypto.decrypt(self.keys, row["locked_payload"]))
         self.store.set_locked(note_id, None)
+        self.store.set_body(note_id, body)
         return {"body": body, "meta": self.store.note_meta(note_id)}
+
+    # ------------------------------------------- attachments of locked notes
+
+    def _attachment_file(self, uri):
+        """Path of a plain attachment the app stored itself, else None."""
+        if not uri.startswith("file://"):
+            return None
+        try:
+            path = GLib.filename_from_uri(html.unescape(uri))[0]
+        except GLib.Error:
+            return None
+        if os.path.dirname(path) != self.store.attachments_dir or not os.path.isfile(path):
+            return None
+        return path
+
+    def _locked_file(self, uri):
+        if not uri.startswith(LOCKED_PREFIX):
+            return None
+        name = urllib.parse.unquote(uri[len(LOCKED_PREFIX):].split("?")[0])
+        if name != os.path.basename(name) or not name.endswith(".locked"):
+            return None
+        return os.path.join(self.store.attachments_dir, name)
+
+    def read_locked(self, uri):
+        """Decrypted bytes of a locked attachment; needs the password to have been entered."""
+        path = self._locked_file(uri)
+        if path is None:
+            raise ValueError(f"not a locked attachment: {uri}")
+        if self.keys is None:
+            raise PermissionError("locked")
+        with open(path, "rb") as fh:
+            return crypto.decrypt_bytes(self.keys, fh.read())
+
+    @staticmethod
+    def _plain_name(name):
+        """Original file name of an attachment: without the random prefix and .locked."""
+        name = name[:-len(".locked")] if name.endswith(".locked") else name
+        return re.sub(r"^[0-9a-f]{12}-", "", name)
+
+    def _write_locked(self, name, data):
+        path = self._attachment_path(name) + ".locked"
+        with open(path, "wb") as fh:
+            fh.write(crypto.encrypt_bytes(self.keys, data))
+        return LOCKED_PREFIX + urllib.parse.quote(os.path.basename(path))
+
+    def _seal_attachments(self, body):
+        """Encrypt the plain attachments a note body points at. Returns the body pointing at the
+        encrypted copies and the plain files, which the caller removes once nothing else uses them."""
+        done = {}
+
+        def repl(m):
+            path = self._attachment_file(m.group(2))
+            if path is None:
+                return m.group(0)
+            if path not in done:
+                with open(path, "rb") as fh:
+                    done[path] = self._write_locked(self._plain_name(os.path.basename(path)), fh.read())
+            return m.group(1) + done[path] + m.group(3)
+
+        return ATTACHMENT_REF.sub(repl, body), list(done)
+
+    def _unseal_attachments(self, body):
+        """The other way round, when a lock is removed. Encrypted files stay: a duplicate may use them."""
+        done = {}
+
+        def repl(m):
+            uri = html.unescape(m.group(2))
+            if self._locked_file(uri) is None:
+                return m.group(0)
+            if uri not in done:
+                try:
+                    data = self.read_locked(uri)
+                except (OSError, ValueError):
+                    return m.group(0)
+                path = self._attachment_path(self._plain_name(uri.rsplit("/", 1)[1]))
+                with open(path, "wb") as fh:
+                    fh.write(data)
+                done[uri] = html.escape(GLib.filename_to_uri(path))
+            return m.group(1) + done[uri] + m.group(3)
+
+        return ATTACHMENT_REF.sub(repl, body)
+
+    def _discard_plain(self, paths):
+        """Wipe plain attachments that were just encrypted, unless another note still shows them."""
+        if not paths:
+            return
+        locked_bodies = []
+        for row in self.store.locked_notes():
+            try:
+                locked_bodies.append(crypto.decrypt(self.keys, row["locked_payload"]))
+            except ValueError:
+                locked_bodies.append(None)  # unreadable: keep everything, to be safe
+        for path in paths:
+            name = os.path.basename(path)
+            prefix = re.match(r"^[0-9a-f]{12}-", name)  # unique per stored file, however the URI spells it
+            needle = prefix.group(0) if prefix else urllib.parse.quote(name)
+            if self.store.references(needle) or any(b is None or needle in b for b in locked_bodies):
+                continue
+            wipe_file(path)
+
+    def _locked_note(self, note_id):
+        if note_id is None or self.keys is None:
+            return False
+        try:
+            return bool(self.store.note_row(note_id)["locked"])
+        except KeyError:
+            return False
 
     # ---------------------------------------------------------- attachments
 
@@ -304,36 +487,54 @@ class Api:
         base = re.sub(r"[^\w.\- ]+", "_", base).strip() or "attachment"
         return os.path.join(self.store.attachments_dir, f"{uuid.uuid4().hex[:12]}-{base}")
 
-    def saveAttachment(self, name, data_b64):
+    def saveAttachment(self, name, data_b64, note_id=None):
+        """note_id: the note it goes into. Attachments of a locked note are stored encrypted."""
+        data = base64.b64decode(data_b64)
+        if self._locked_note(note_id):
+            return {"uri": self._write_locked(os.path.basename(name or "attachment"), data), "size": len(data)}
         path = self._attachment_path(name)
         with open(path, "wb") as fh:
-            fh.write(base64.b64decode(data_b64))
+            fh.write(data)
         return {"uri": GLib.filename_to_uri(path), "size": os.path.getsize(path)}
 
-    def copyAttachment(self, uri):
+    def copyAttachment(self, uri, note_id=None):
         """Copy a file dropped from the file manager (WebKitGTK hands the page only its file:// URI)."""
         src = GLib.filename_from_uri(uri)[0]
         if not os.path.isfile(src):
             raise ValueError(f"not a file: {src}")
         name = os.path.basename(src)
+        mime = mimetypes.guess_type(name)[0] or ""
+        if self._locked_note(note_id):
+            with open(src, "rb") as fh:
+                data = fh.read()
+            return {"name": name, "type": mime, "uri": self._write_locked(name, data), "size": len(data)}
         path = self._attachment_path(name)
         shutil.copyfile(src, path)
-        return {"name": name, "type": mimetypes.guess_type(name)[0] or "", "uri": GLib.filename_to_uri(path),
-                "size": os.path.getsize(path)}
+        return {"name": name, "type": mime, "uri": GLib.filename_to_uri(path), "size": os.path.getsize(path)}
 
-    def chooseAttachments(self, images_only=False):
+    def chooseAttachments(self, images_only=False, note_id=None):
         paths = self.win.choose_open_paths("Add Photos" if images_only else "Attach File", "_Add",
                                            "image" if images_only else None)
         out = []
         for path in paths:
             try:
-                out.append(self.copyAttachment(GLib.filename_to_uri(path)))
+                out.append(self.copyAttachment(GLib.filename_to_uri(path), note_id))
             except (OSError, ValueError) as exc:
                 self.log("attach failed", path, exc)
         return out
 
     def openExternal(self, uri):
-        if not re.match(r"^(https?|mailto|file|tel):", uri, re.I):
+        if uri.startswith(LOCKED_PREFIX):
+            # Other apps can't read the encrypted file: they get a decrypted copy kept in memory.
+            data = self.read_locked(uri)
+            folder = os.path.join(open_copies_dir(), uuid.uuid4().hex[:8])
+            os.makedirs(folder, mode=0o700)
+            os.chmod(open_copies_dir(), 0o700)
+            path = os.path.join(folder, self._plain_name(self._locked_file(uri).rsplit("/", 1)[1]))
+            with open(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as fh:
+                fh.write(data)
+            uri = GLib.filename_to_uri(path)
+        elif not re.match(r"^(https?|mailto|file|tel):", uri, re.I):
             uri = "https://" + uri
         Gtk.show_uri_on_window(self.win, uri, Gtk.get_current_event_time())
 
@@ -379,13 +580,17 @@ class Api:
 
         def repl(m):
             uri = m.group(2)
-            if not uri.startswith(prefix):
-                return m.group(0)
             try:
-                path = GLib.filename_from_uri(uri)[0]
-                with open(path, "rb") as fh:
-                    data = base64.b64encode(fh.read()).decode()
-            except (OSError, GLib.Error):
+                if uri.startswith(LOCKED_PREFIX):
+                    path = self._plain_name(self._locked_file(uri) or "")
+                    data = base64.b64encode(self.read_locked(uri)).decode()
+                elif uri.startswith(prefix):
+                    path = GLib.filename_from_uri(uri)[0]
+                    with open(path, "rb") as fh:
+                        data = base64.b64encode(fh.read()).decode()
+                else:
+                    return m.group(0)
+            except (OSError, ValueError, GLib.Error):
                 return m.group(0)
             mime = mimetypes.guess_type(path)[0] or "application/octet-stream"
             return f'{m.group(1)}"data:{mime};base64,{data}"'
@@ -549,6 +754,8 @@ class NotesWindow(Gtk.ApplicationWindow):
         ctx = self.webview.get_context()
         ctx.set_spell_checking_enabled(True)
         link_bundled_dictionaries()
+        ctx.register_uri_scheme(LOCKED_SCHEME, self._on_locked_request)
+        ctx.get_security_manager().register_uri_scheme_as_cors_enabled(LOCKED_SCHEME)
         ctx.set_spell_checking_languages(spelling_languages(GLib.get_language_names(), installed_dictionaries()))
 
         self.webview.connect("decide-policy", self._on_decide_policy)
@@ -943,6 +1150,15 @@ class NotesWindow(Gtk.ApplicationWindow):
             return True
         return False
 
+    def _on_locked_request(self, request):
+        try:
+            data = self.api.read_locked(request.get_uri())
+        except (OSError, ValueError, PermissionError) as exc:
+            request.finish_error(GLib.Error(str(exc)))
+            return
+        mime = mimetypes.guess_type(self.api._plain_name(request.get_path()))[0] or "application/octet-stream"
+        request.finish(Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(data)), len(data), mime)
+
     def _on_context_menu(self, _view, menu, _event, _hit):
         unwanted = {
             WebKit2.ContextMenuAction.RELOAD, WebKit2.ContextMenuAction.GO_BACK,
@@ -1130,6 +1346,7 @@ class NotesApplication(Gtk.Application):
         self.window.present()
 
     def do_shutdown(self):
+        clear_open_copies()
         if self.store:
             self.store.close()
         Gtk.Application.do_shutdown(self)

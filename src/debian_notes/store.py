@@ -70,6 +70,8 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
         self.db.execute("PRAGMA journal_mode = WAL")
+        # Deleted text (old versions, a note's plaintext once it is locked) is overwritten, not just freed.
+        self.db.execute("PRAGMA secure_delete = ON")
         self.db.executescript(SCHEMA)
         self.first_run = self.default_folder_id() is None
         if self.first_run:
@@ -82,6 +84,9 @@ class Store:
         self.db.execute("DELETE FROM imports WHERE source LIKE 'icloud-push%'")
         self.db.commit()
         self.purge_trash()
+        if not self.get_setting("store.scrubbed"):
+            self.scrub()
+            self.set_setting("store.scrubbed", True)
 
     # ---------------------------------------------------------------- folders
 
@@ -253,21 +258,35 @@ class Store:
         self.db.commit()
         return self.note_meta(note_id)
 
-    def set_locked(self, note_id, payload):
+    def set_locked(self, note_id, payload, title=None):
         """payload=None removes the lock (caller then saves the plaintext body)."""
         if payload is None:
             self.db.execute("UPDATE notes SET locked = 0, locked_payload = NULL WHERE id = ?", (note_id,))
         else:
             self.db.execute(
                 "UPDATE notes SET locked = 1, locked_payload = ?, body = '', plain = '', snippet = '',"
-                " thumbnail = NULL WHERE id = ?",
-                (payload, note_id),
+                " thumbnail = NULL, title = coalesce(?, title), updated_at = ? WHERE id = ?",
+                (payload, title, time.time(), note_id),
             )
             # Older versions hold the plaintext: a locked note keeps no history.
             self.db.execute("DELETE FROM versions WHERE note_id = ?", (note_id,))
             self._set_tags(note_id, ())
         self.db.commit()
+        if payload is not None:
+            self.flush_journal()
         return self.note_meta(note_id)
+
+    def set_body(self, note_id, body):
+        self.db.execute("UPDATE notes SET body = ? WHERE id = ?", (body, note_id))
+        self.db.commit()
+
+    def references(self, needle):
+        """Notes and versions (plaintext ones) whose content mentions needle, such as an attachment file name."""
+        like = "%" + needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        r = self.db.execute(
+            "SELECT (SELECT count(*) FROM notes WHERE body LIKE ? ESCAPE '\\')"
+            " + (SELECT count(*) FROM versions WHERE body LIKE ? ESCAPE '\\')", (like, like)).fetchone()
+        return r[0]
 
     def locked_notes(self):
         return self.db.execute("SELECT id, locked_payload FROM notes WHERE locked = 1").fetchall()
@@ -310,10 +329,12 @@ class Store:
     def delete_note(self, note_id):
         self.db.execute("DELETE FROM notes WHERE id = ?", (note_id,))
         self.db.commit()
+        self.flush_journal()
 
     def empty_trash(self):
         self.db.execute("DELETE FROM notes WHERE deleted_at IS NOT NULL")
         self.db.commit()
+        self.flush_journal()
 
     def duplicate_note(self, note_id):
         r = self.note_row(note_id)
@@ -346,7 +367,9 @@ class Store:
 
     def purge_trash(self):
         cutoff = time.time() - TRASH_RETENTION_DAYS * 86400
-        self.db.execute("DELETE FROM notes WHERE deleted_at IS NOT NULL AND deleted_at < ?", (cutoff,))
+        if self.db.execute("DELETE FROM notes WHERE deleted_at IS NOT NULL AND deleted_at < ?", (cutoff,)).rowcount:
+            self.db.commit()
+            self.flush_journal()
         self.db.commit()
 
     def _set_tags(self, note_id, tags):
@@ -523,6 +546,17 @@ class Store:
             (key, json.dumps(value)),
         )
         self.db.commit()
+
+    def flush_journal(self):
+        """Move the write-ahead log into the database and empty it: until then it keeps earlier
+        copies of changed pages, plaintext of a note that was just locked or deleted included."""
+        self.db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+    def scrub(self):
+        """Rebuild the database so free pages holding text from before secure_delete are gone."""
+        self.db.commit()
+        self.db.execute("VACUUM")
+        self.flush_journal()
 
     def close(self):
         self.db.commit()

@@ -201,6 +201,7 @@
     ed.spellcheck = true;
     ed.innerHTML = body && body.trim() ? body : E.initialHtml();
     stopAudio();
+    forgetLockedAudio();
     hydrateAudio(ed);
     document.getElementById('editor').replaceWith(ed);
     root = ed;
@@ -220,6 +221,7 @@
   E.unmount = function () {
     closeSlash();
     stopAudio();
+    forgetLockedAudio();
     clearTimeout(saveTimer);
     note = null;
     readOnly = true;
@@ -765,6 +767,7 @@
 
   function hydrateAudio(scope) {
     for (const card of scope.querySelectorAll('a.nt-audio')) {
+      lockedAudioUrl(card.getAttribute('href'));
       const peaks = (card.dataset.peaks || '').split(',').map(Number).filter((n) => n > 0);
       const bars = (peaks.length ? peaks : Array(AUDIO_BARS).fill(30))
         .map((h) => `<span class="nt-audio-bar" style="height:${N.clamp(h, 8, 100)}%"></span>`).join('');
@@ -801,12 +804,41 @@
     if (card.isConnected) hydrateAudio(card.parentNode);
   }
 
+  // Audio of a locked note comes decrypted through notes-locked://, which WebKitGTK's media player
+  // can't load: it plays from an in-memory copy instead, made when the note opens so a click can
+  // start it right away (playback has to begin while the click still counts).
+  let lockedAudio = new Map();  // notes-locked:// URI -> Promise of a blob: URL
+
+  function lockedAudioUrl(uri) {
+    if (!/^notes-locked:/i.test(uri || '')) return null;
+    if (!lockedAudio.has(uri)) {
+      const p = readUri(uri).then((buf) => { const url = URL.createObjectURL(new Blob([buf])); p.url = url; return url; });
+      p.catch(() => lockedAudio.delete(uri));
+      lockedAudio.set(uri, p);
+    }
+    return lockedAudio.get(uri);
+  }
+
+  function forgetLockedAudio() {
+    for (const p of lockedAudio.values()) p.then((url) => URL.revokeObjectURL(url), () => {});
+    lockedAudio = new Map();
+  }
+
+  function setAudioSource(audio, uri) {
+    const pending = lockedAudioUrl(uri);
+    if (!pending) { audio.src = uri; return Promise.resolve(); }
+    if (pending.url) { audio.src = pending.url; return Promise.resolve(); }
+    return pending.then((url) => { if (player && player.audio === audio) audio.src = url; },
+      () => audio.dispatchEvent(new Event('error')));
+  }
+
   // Click the button to play or pause, click the waveform to jump there.
   function onAudioClick(card, e) {
     if (!player || player.card !== card) {
       stopAudio();
-      const audio = new Audio(card.getAttribute('href'));
-      player = { audio, card };
+      const audio = new Audio();
+      player = { audio, card, ready: null };
+      player.ready = setAudioSource(audio, card.getAttribute('href'));
       for (const ev of ['play', 'pause', 'timeupdate', 'seeked']) audio.addEventListener(ev, () => { if (player && player.audio === audio) showAudio(); });
       audio.addEventListener('ended', () => { if (player && player.audio === audio) stopAudio(); });
       audio.addEventListener('error', () => {
@@ -815,15 +847,19 @@
         N.ui.toast("Couldn't play this audio file");
       });
     }
-    const { audio } = player;
+    const { audio, ready } = player;
     const wave = e.target.closest('.nt-audio-wave');
-    if (wave) {
-      const r = wave.getBoundingClientRect();
-      const seek = () => { audio.currentTime = N.clamp((e.clientX - r.left) / r.width, 0, 1) * audio.duration; };
-      if (audio.readyState >= 1) seek(); else audio.addEventListener('loadedmetadata', seek, { once: true });
-      if (audio.paused) audio.play().catch(() => {});
-    } else if (audio.paused) audio.play().catch(() => {});
-    else audio.pause();
+    const r = wave && wave.getBoundingClientRect();
+    const go = () => {
+      if (!player || player.audio !== audio) return;
+      if (wave) {
+        const seek = () => { audio.currentTime = N.clamp((e.clientX - r.left) / r.width, 0, 1) * audio.duration; };
+        if (audio.readyState >= 1) seek(); else audio.addEventListener('loadedmetadata', seek, { once: true });
+        if (audio.paused) audio.play().catch(() => {});
+      } else if (audio.paused) audio.play().catch(() => {});
+      else audio.pause();
+    };
+    if (audio.src) go(); else ready.then(go);
   }
 
   E.saveRange = function () {
@@ -846,7 +882,7 @@
     const items = [];
     for (const f of files) {
       try {
-        const res = await N.call('saveAttachment', f.name, await N.fileToBase64(f));
+        const res = await N.call('saveAttachment', f.name, await N.fileToBase64(f), E.noteId());
         items.push({ name: f.name, type: f.type, uri: res.uri, size: res.size, file: f });
       } catch (err) {
         N.ui.toast(`Couldn't attach ${f.name}`);
@@ -874,7 +910,7 @@
   };
 
   E.insertImageData = async function (dataUrl, name, cls, range) {
-    const res = await N.call('saveAttachment', name, dataUrl.split(',', 2)[1]);
+    const res = await N.call('saveAttachment', name, dataUrl.split(',', 2)[1], E.noteId());
     useRange(range);
     history.commit();
     exec('insertHTML', `<div><img class="nt-img ${cls || ''}" src="${N.esc(res.uri)}" alt=""></div><div><br></div>`);
@@ -887,7 +923,7 @@
       const src = img.getAttribute('src');
       const ext = (src.match(/^data:image\/(\w+)/) || [])[1] || 'png';
       try {
-        const res = await N.call('saveAttachment', 'pasted.' + ext, src.split(',', 2)[1]);
+        const res = await N.call('saveAttachment', 'pasted.' + ext, src.split(',', 2)[1], E.noteId());
         img.setAttribute('src', res.uri);
       } catch (_) { /* keep inline data */ }
     }
@@ -1385,7 +1421,7 @@
     const items = [];
     for (const uri of uris) {
       try {
-        items.push(await N.call('copyAttachment', uri));
+        items.push(await N.call('copyAttachment', uri, E.noteId()));
       } catch (err) {
         N.ui.toast(`Couldn't attach ${decodeURIComponent(uri.split('/').pop())}`);
       }

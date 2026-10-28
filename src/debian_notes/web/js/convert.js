@@ -150,11 +150,11 @@
         el = document.createElement(tag);
         if (tag === 'a') {
           const href = node.getAttribute('href') || '';
-          if (/^(https?:|mailto:|tel:|file:)/i.test(href)) el.setAttribute('href', href);
+          if (/^(https?:|mailto:|tel:|file:|notes-locked:)/i.test(href)) el.setAttribute('href', href);
         } else if (tag === 'img') {
           // Safari/Notes put placeholders like webkit-fake-url:// on the clipboard; they never load.
           const src = node.getAttribute('src') || '';
-          if (!/^(https?:|file:|data:image\/)/i.test(src)) continue;
+          if (!/^(https?:|file:|notes-locked:|data:image\/)/i.test(src)) continue;
           el.setAttribute('src', src);
           el.className = node.classList.contains('nt-sketch') ? 'nt-img nt-sketch' : 'nt-img';
           dst.appendChild(el);

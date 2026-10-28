@@ -926,6 +926,7 @@
     await N.editor.flush();
     const meta = await N.call('lockNote', id, N.editor.serialize());
     S.notes.set(id, meta);
+    await openNote(id);  // its photos and files now point at their encrypted copies
     A.refresh();
     N.notelist.updateSelection();
     N.ui.toast('Note locked');
@@ -1063,7 +1064,7 @@
   // The GTK file chooser, run from Python: it copies the chosen files into the attachments folder.
   async function pickFiles(imagesOnly, range) {
     range = range || N.editor.saveRange();
-    N.editor.insertAttachments(await N.call('chooseAttachments', imagesOnly), range);
+    N.editor.insertAttachments(await N.call('chooseAttachments', imagesOnly, N.editor.noteId()), range);
   }
 
   A.insertPhotos = () => pickFiles(true);

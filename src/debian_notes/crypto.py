@@ -3,7 +3,8 @@
 Key derivation: PBKDF2-HMAC-SHA256 (600k iterations) over a per-database salt
 yields 64 bytes, split into an encryption key and a MAC key. Each payload is
 encrypted with an HMAC-SHA256 keystream in counter mode under a fresh random
-nonce, then authenticated with HMAC-SHA256 (encrypt-then-MAC).
+nonce, then authenticated with HMAC-SHA256 (encrypt-then-MAC). Note bodies are
+stored as JSON; attachment files as MAGIC + nonce + tag + ciphertext.
 """
 
 import base64
@@ -14,6 +15,7 @@ import os
 
 ITERATIONS = 600_000
 VERSION = 1
+MAGIC = b"DNLOCK1\0"
 
 
 class Keys:
@@ -42,19 +44,31 @@ def check(keys, expected):
 
 
 def _keystream(key, nonce, length):
-    out = bytearray()
-    counter = 0
-    while len(out) < length:
-        out += hmac.new(key, nonce + counter.to_bytes(8, "big"), hashlib.sha256).digest()
-        counter += 1
-    return bytes(out[:length])
+    blocks = (length + 31) // 32
+    return b"".join(hmac.digest(key, nonce + i.to_bytes(8, "big"), "sha256") for i in range(blocks))[:length]
+
+
+def _xor(data, key, nonce):
+    if not data:
+        return b""
+    stream = _keystream(key, nonce, len(data))
+    return (int.from_bytes(data, "big") ^ int.from_bytes(stream, "big")).to_bytes(len(data), "big")
+
+
+def _seal(keys, data):
+    nonce = os.urandom(16)
+    ct = _xor(data, keys.enc, nonce)
+    return nonce, ct, hmac.digest(keys.mac, nonce + ct, "sha256")
+
+
+def _open(keys, nonce, ct, tag):
+    if not hmac.compare_digest(tag, hmac.digest(keys.mac, nonce + ct, "sha256")):
+        raise ValueError("Wrong password or damaged note")
+    return _xor(ct, keys.enc, nonce)
 
 
 def encrypt(keys, plaintext):
-    data = plaintext.encode("utf-8")
-    nonce = os.urandom(16)
-    ct = bytes(a ^ b for a, b in zip(data, _keystream(keys.enc, nonce, len(data))))
-    tag = hmac.new(keys.mac, nonce + ct, hashlib.sha256).digest()
+    nonce, ct, tag = _seal(keys, plaintext.encode("utf-8"))
     return json.dumps({
         "v": VERSION,
         "n": base64.b64encode(nonce).decode(),
@@ -68,6 +82,17 @@ def decrypt(keys, payload):
     nonce = base64.b64decode(obj["n"])
     ct = base64.b64decode(obj["c"])
     tag = base64.b64decode(obj["t"])
-    if not hmac.compare_digest(tag, hmac.new(keys.mac, nonce + ct, hashlib.sha256).digest()):
-        raise ValueError("Wrong password or damaged note")
-    return bytes(a ^ b for a, b in zip(ct, _keystream(keys.enc, nonce, len(ct)))).decode("utf-8")
+    return _open(keys, nonce, ct, tag).decode("utf-8")
+
+
+def encrypt_bytes(keys, data):
+    """Binary payload for attachment files."""
+    nonce, ct, tag = _seal(keys, data)
+    return MAGIC + nonce + tag + ct
+
+
+def decrypt_bytes(keys, blob):
+    if not blob.startswith(MAGIC):
+        raise ValueError("Not an encrypted attachment")
+    blob = blob[len(MAGIC):]
+    return _open(keys, blob[:16], blob[48:], blob[16:48])
