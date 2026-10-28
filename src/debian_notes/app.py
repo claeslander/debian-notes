@@ -46,6 +46,69 @@ def data_dir():
     return path
 
 
+SYSTEM_DICT_DIRS = ["/usr/share/hunspell", "/usr/share/myspell", "/usr/share/myspell/dicts"]
+USER_DICT_DIR = os.path.join(GLib.get_user_config_dir(), "enchant", "hunspell")  # Enchant looks here too
+DICT_DIRS = SYSTEM_DICT_DIRS + [USER_DICT_DIR]
+BUNDLED_DICT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dictionaries")
+MAX_SPELL_LANGS = 4
+
+
+def installed_dictionaries(dirs=DICT_DIRS):
+    """Language codes (nl, nl_BE, en_US...) with a hunspell dictionary on this machine."""
+    found = set()
+    for d in dirs:
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        for name in names:
+            code, ext = os.path.splitext(name)
+            if ext == ".dic" and code + ".aff" in names and re.match(r"^[a-z]{2,3}(_[A-Z]{2})?$", code):
+                found.add(code)
+    return found
+
+
+def link_bundled_dictionaries(src=BUNDLED_DICT_DIR, dest=USER_DICT_DIR, system_dirs=SYSTEM_DICT_DIRS):
+    """Make the dictionaries shipped with the app (Dutch, English) visible to Enchant by linking
+    them into its user folder, unless the system already has them. Learned words stay in
+    Enchant's own personal word lists, shared with other apps."""
+    system = installed_dictionaries(system_dirs)
+    for code in sorted(installed_dictionaries([src]) - system):
+        for ext in (".aff", ".dic"):
+            target, link = os.path.join(src, code + ext), os.path.join(dest, code + ext)
+            try:
+                if os.path.islink(link) and os.readlink(link) != target:
+                    os.remove(link)  # left behind by an older checkout or install
+                if not os.path.lexists(link):
+                    os.makedirs(dest, exist_ok=True)
+                    os.symlink(target, link)
+            except OSError:
+                traceback.print_exc()
+
+
+def spelling_languages(locale_langs, installed):
+    """The locale's languages first, then every other language with a dictionary (one variant each),
+    so mixed-language notes (say English and Dutch) are checked against all of them."""
+    def resolve(code):
+        if code in installed:
+            return code
+        base = code.split("_")[0]
+        if base in installed:
+            return base
+        return next((c for c in sorted(installed) if c.startswith(base + "_")), None)
+
+    langs, bases = [], set()
+    wanted = [l for l in locale_langs if re.match(r"^[a-z]{2,3}(_[A-Z]{2})?$", l)]
+    for code in wanted + sorted(installed):
+        hit = resolve(code)
+        if hit and hit.split("_")[0] not in bases:
+            bases.add(hit.split("_")[0])
+            langs.append(hit)
+    if not installed:  # unknown dictionary layout: leave it to Enchant
+        langs = wanted[:1]
+    return (langs or ["en_US"])[:MAX_SPELL_LANGS]
+
+
 class Api:
     """Every public method here is callable from JavaScript via N.call(name, ...args)."""
 
@@ -485,8 +548,8 @@ class NotesWindow(Gtk.ApplicationWindow):
 
         ctx = self.webview.get_context()
         ctx.set_spell_checking_enabled(True)
-        langs = [l for l in GLib.get_language_names() if re.match(r"^[a-z]{2}(_[A-Z]{2})?$", l)]
-        ctx.set_spell_checking_languages((langs or ["en_US"])[:3])
+        link_bundled_dictionaries()
+        ctx.set_spell_checking_languages(spelling_languages(GLib.get_language_names(), installed_dictionaries()))
 
         self.webview.connect("decide-policy", self._on_decide_policy)
         self.webview.connect("context-menu", self._on_context_menu)

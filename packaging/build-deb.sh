@@ -27,6 +27,10 @@ install -m 644 "$ROOT/data/org.debiannotes.Notes.metainfo.xml" "$STAGE/usr/share
   echo "Copyright: 2026 Lander Claes"
   echo "License: MIT"
   sed 's/^/ /; s/^ $/ ./' "$ROOT/LICENSE"
+  for dict in "$ROOT"/src/debian_notes/dictionaries/*.copyright; do
+    printf '\n# Bundled spelling dictionary %s (usr/share/%s/debian_notes/dictionaries)\n' "$(basename "$dict" .copyright)" "$PKG"
+    cat "$dict"
+  done
 } > "$STAGE/usr/share/doc/$PKG/copyright"
 printf '%s (%s) unstable; urgency=low\n\n  * Release %s.\n\n -- Lander Claes <183724844+claeslander@users.noreply.github.com>  %s\n' \
   "$PKG" "$VERSION" "$VERSION" "$(date -R)" | gzip -9n > "$STAGE/usr/share/doc/$PKG/changelog.Debian.gz"
