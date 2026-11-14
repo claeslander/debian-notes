@@ -1152,6 +1152,21 @@
 
   E.closeSlash = closeSlash;
 
+  // Ctrl+Up / Ctrl+Down: the caret goes to the start of the previous / next paragraph (list item, cell, ...).
+  function moveToParagraph(step) {
+    const r = rangeInEditor();
+    if (!r) return;
+    const paragraphs = [...root.querySelectorAll('*')].filter((el) =>
+      BLOCK_RE.test(el.tagName) && !el.querySelector('h1, h2, h3, div, p, pre, li, blockquote, td'));
+    if (!paragraphs.length) return;
+    const here = blockOf(r.startContainer);
+    let i = paragraphs.findIndex((p) => p === here || p.contains(r.startContainer));
+    if (i < 0) i = step > 0 ? -1 : paragraphs.length;
+    const target = paragraphs[Math.min(paragraphs.length - 1, Math.max(0, i + step))];
+    placeCaret(target, 0);
+    target.scrollIntoView({ block: 'nearest' });
+  }
+
   function onKeyDown(e) {
     if (!root || !(e.target === root || root.contains(e.target))) return;
     if (slashKey(e)) { e.stopPropagation(); return; }
@@ -1160,6 +1175,11 @@
     if (mod && !e.altKey && key === 'z') { e.preventDefault(); if (e.shiftKey) E.redo(); else E.undo(); return; }
     if (mod && !e.altKey && key === 'y') { e.preventDefault(); E.redo(); return; }
     if (readOnly) return;
+    if (e.ctrlKey && !e.shiftKey && !e.altKey && !e.metaKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      e.preventDefault();
+      moveToParagraph(e.key === 'ArrowDown' ? 1 : -1);
+      return;
+    }
     if (mod && !e.shiftKey && !e.altKey && (key === 'b' || key === 'i' || key === 'u')) {
       e.preventDefault();
       E.toggleInline({ b: 'bold', i: 'italic', u: 'underline' }[key]);

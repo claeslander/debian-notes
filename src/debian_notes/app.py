@@ -174,6 +174,9 @@ class Api:
     def log(self, *parts):
         print("[web]", *parts, file=sys.stderr)
 
+    def setTextFocus(self, editing):
+        self.win.text_focused = bool(editing)
+
     # ---------------------------------------------------------------- notes
 
     def getNote(self, note_id):
@@ -769,6 +772,7 @@ class NotesWindow(Gtk.ApplicationWindow):
         self.overlay.add(self.webview)
         self.add(self.overlay)
         self.icloud_view = None
+        self.text_focused = False  # the page reports whether a text field (the note, search) has focus
         self.mode = "icloud"
         self.icloud_ready = False
         self.icloud_wanted = False
@@ -969,6 +973,8 @@ class NotesWindow(Gtk.ApplicationWindow):
             return True
         if mods != ctrl or event.keyval not in (Gdk.KEY_Left, Gdk.KEY_Right):
             return False
+        if self.text_focused:
+            return False  # typing: Ctrl+Left/Right move the cursor a word, as in any text field
         mode = "icloud" if event.keyval == Gdk.KEY_Left else "local"
         if mode == self.mode:
             return False  # already there: the key does what it normally does (jump a word)

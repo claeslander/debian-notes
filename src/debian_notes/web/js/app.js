@@ -1492,6 +1492,13 @@
     });
     document.getElementById('editor-scroll').addEventListener('mousedown', revealNote, true);
     document.addEventListener('focusout', (e) => updatePrivacy(e.relatedTarget));
+    // Python needs to know whether typing is going on, so Ctrl+Left/Right move the cursor instead of switching modes.
+    const reportTextFocus = () => setTimeout(() => {
+      const el = document.activeElement;
+      N.send('setTextFocus', !!el && (el.isContentEditable || el.matches('input, textarea')));
+    });
+    document.addEventListener('focusin', reportTextFocus);
+    document.addEventListener('focusout', reportTextFocus);
     document.getElementById('editor-scroll').addEventListener('dblclick', () => {
       const n = currentNote();
       if (n && n.icloud && !n.deletedAt) A.editInICloud(n.id);  // read-only here: edit it in iCloud
